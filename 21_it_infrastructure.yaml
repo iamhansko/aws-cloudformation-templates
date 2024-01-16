@@ -18,11 +18,11 @@ Resources:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.0.0.0/16
-      #EnableDnsHostnames: Boolean
-      #EnableDnsSupport: Boolean
-      #InstanceTenancy: String
-      #Ipv4IpamPoolId: String
-      #Ipv4NetmaskLength: Integer
+      EnableDnsHostnames: True
+      EnableDnsSupport: True
+      # InstanceTenancy: String
+      # Ipv4IpamPoolId: String
+      # Ipv4NetmaskLength: Integer
       Tags: 
         - Key : Name
           Value : vpc-skills-ap
@@ -406,7 +406,7 @@ Resources:
       InstanceProfileName: Ec2GetS3Profile
       # Path: String
       Roles: 
-        - !Ref StableIamRole
+        - !Ref IamRole
   StableLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
@@ -521,13 +521,36 @@ Resources:
       # ServiceLinkedRoleARN: String
       # Tags: 
       #   - TagProperty
-      # TargetGroupARNs: 
-      #   - String
+      TargetGroupARNs: 
+        - !Ref StableTargetGroup
       # TerminationPolicies: 
       #   - String
       VPCZoneIdentifier: 
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB
+  StableAutoScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      AutoScalingGroupName: !Ref StableAutoScalingGroup
+      # Cooldown: String
+      # EstimatedInstanceWarmup: Integer
+      # MetricAggregationType: Average
+      # MinAdjustmentMagnitude: Integer
+      PolicyType: TargetTrackingScaling
+      # PredictiveScalingConfiguration: 
+      #   PredictiveScalingConfiguration
+      # ScalingAdjustment: Integer
+      # StepAdjustments: 
+      #   - StepAdjustment
+      TargetTrackingConfiguration: 
+        # CustomizedMetricSpecification: 
+        #   CustomizedMetricSpecification
+        # DisableScaleIn: Boolean
+        PredefinedMetricSpecification: 
+          PredefinedMetricType: ASGAverageCPUUtilization
+          # ResourceLabel: String
+        TargetValue: 10
   TestLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
@@ -598,9 +621,9 @@ Resources:
           cd /var/www/html
           aws s3 cp s3://skills-seoul19990731/v2.tar .
           cd /var/www/html
-          tar -xvf v1.tar
-          rm v1.tar
-          mv v1/* ./
+          tar -xvf v2.tar
+          rm v2.tar
+          mv v2/* ./
       LaunchTemplateName: web-skills-ap-test-template
   TestAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -642,13 +665,36 @@ Resources:
       # ServiceLinkedRoleARN: String
       # Tags: 
       #   - TagProperty
-      # TargetGroupARNs: 
-      #   - String
+      TargetGroupARNs: 
+        - !Ref TestTargetGroup
       # TerminationPolicies: 
       #   - String
       VPCZoneIdentifier: 
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB
+  TestAutoScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      AutoScalingGroupName: !Ref TestAutoScalingGroup
+      # Cooldown: String
+      # EstimatedInstanceWarmup: Integer
+      # MetricAggregationType: Average
+      # MinAdjustmentMagnitude: Integer
+      PolicyType: TargetTrackingScaling
+      # PredictiveScalingConfiguration: 
+      #   PredictiveScalingConfiguration
+      # ScalingAdjustment: Integer
+      # StepAdjustments: 
+      #   - StepAdjustment
+      TargetTrackingConfiguration: 
+        # CustomizedMetricSpecification: 
+        #   CustomizedMetricSpecification
+        # DisableScaleIn: Boolean
+        PredefinedMetricSpecification: 
+          PredefinedMetricType: ASGAverageCPUUtilization
+          # ResourceLabel: String
+        TargetValue: 10
   AutoScalingGroupSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -668,3 +714,247 @@ Resources:
       # Tags: 
       #   - Tag
       VpcId: !Ref Vpc
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      # LoadBalancerAttributes: 
+      #   - LoadBalancerAttribute
+      Name: web-cc2021-ap-int
+      Scheme: internet-facing
+      SecurityGroups: 
+        - !Ref ApplicationLoadBalancerSecurityGroup
+      # SubnetMappings: 
+      #   - SubnetMapping
+      Subnets: 
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      # Tags: 
+      #   - Tag
+      Type: application
+  ApplicationLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Application Load Balancer"
+      GroupName: alb-sg
+      # SecurityGroupEgress: 
+      #   - Egress
+      SecurityGroupIngress: 
+        - CidrIp: 0.0.0.0/0
+          # CidrIpv6: String
+          # Description: String
+          FromPort: 80
+          IpProtocol: tcp
+          # SourcePrefixListId: String
+          # SourceSecurityGroupId: String
+          # SourceSecurityGroupName: String
+          # SourceSecurityGroupOwnerId: String
+          ToPort: 80
+      # Tags: 
+      #   - Tag
+      VpcId: !Ref Vpc
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      # AlpnPolicy: 
+      #   - String
+      # Certificates: 
+      #   - Certificate
+      DefaultActions: 
+        - TargetGroupArn: !Ref StableTargetGroup
+          Type: forward
+          # ForwardConfig: 
+          #   ForwardConfig
+          # Order: Integer
+          # RedirectConfig: 
+          #   RedirectConfig
+      LoadBalancerArn: !GetAtt ApplicationLoadBalancer.LoadBalancerArn
+      # MutualAuthentication: 
+      #   MutualAuthentication
+      Port: 80
+      Protocol: HTTP
+      # SslPolicy: String
+  BlockAdminPageListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions: 
+        - FixedResponseConfig: 
+            ContentType: text/plain
+            MessageBody: Not found this WSI page
+            StatusCode: 404
+          # ForwardConfig: 
+          #   ForwardConfig
+          # Order: Integer
+          # RedirectConfig: 
+          #   RedirectConfig
+          # TargetGroupArn: String
+          Type: fixed-response
+      Conditions: 
+        - Field: path-pattern
+          # HostHeaderConfig: 
+          #   HostHeaderConfig
+          # HttpHeaderConfig: 
+          #   HttpHeaderConfig
+          # HttpRequestMethodConfig: 
+          #   HttpRequestMethodConfig
+          # PathPatternConfig: 
+          #   PathPatternConfig
+          # QueryStringConfig: 
+          #   QueryStringConfig
+          # SourceIpConfig: 
+          #   SourceIpConfig
+          Values: 
+            - /swagger-ui.html
+      ListenerArn: !Ref Listener
+      Priority: 1
+  RedirectToTestVersionListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions: 
+        - TargetGroupArn: !Ref TestTargetGroup
+          Type: forward
+          # FixedResponseConfig: 
+          #   FixedResponseConfig
+          # orwardConfig: 
+          #   ForwardConfig
+          # Order: Integer
+          # RedirectConfig: 
+          #   RedirectConfig
+      Conditions: 
+        - Field: query-string
+          # HostHeaderConfig: 
+          #   HostHeaderConfig
+          # HttpHeaderConfig: 
+          #   HttpHeaderConfig
+          # HttpRequestMethodConfig: 
+          #   HttpRequestMethodConfig
+          # PathPatternConfig: 
+          #   PathPatternConfig
+          QueryStringConfig: 
+            Values: 
+              - Key: test
+                Value: true
+          # SourceIpConfig: 
+          #   SourceIpConfig
+          # Values: 
+          #   - String
+      ListenerArn: !Ref Listener
+      Priority: 2
+  StableTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: True
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /health
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      IpAddressType: ipv4
+      # Matcher: 
+      #   Matcher
+      Name: stable-tg
+      Port: 80
+      Protocol: HTTP
+      # ProtocolVersion: String
+      # Tags: 
+      #   - Tag
+      # TargetGroupAttributes: 
+      #   - TargetGroupAttribute
+      # Targets: 
+      #   - TargetDescription
+      TargetType: instance
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref Vpc
+  TestTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: True
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /health
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      IpAddressType: ipv4
+      # Matcher: 
+      #   Matcher
+      Name: test-tg
+      Port: 80
+      Protocol: HTTP
+      # ProtocolVersion: String
+      # Tags: 
+      #   - Tag
+      # TargetGroupAttributes: 
+      #   - TargetGroupAttribute
+      # Targets: 
+      #   - TargetDescription
+      TargetType: instance
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref Vpc
+  CloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ActionsEnabled: False
+      # AlarmActions: 
+      #   - String
+      # AlarmDescription: String
+      AlarmName: ALB-4XX-high
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      DatapointsToAlarm: 1
+      Dimensions: 
+        - Name: LoadBalancer
+          Value: !Select [ 1, !Split [ ":loadbalancer/", !GetAtt ApplicationLoadBalancer.LoadBalancerArn] ]
+      # EvaluateLowSampleCountPercentile: String
+      EvaluationPeriods: 1
+      # ExtendedStatistic: String
+      # InsufficientDataActions: 
+      #   - String
+      MetricName: HTTPCode_Target_4XX_Count
+      # Metrics: 
+      #   - MetricDataQuery
+      Namespace: AWS/ApplicationELB
+      # OKActions: 
+      #   - String
+      Period: 60
+      Statistic: Minimum
+      Threshold: 55
+      # ThresholdMetricId: String
+      # TreatMissingData: String
+      Unit: Count
+  Route53HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      # HostedZoneConfig: 
+      #   HostedZoneConfig
+      # HostedZoneTags: 
+      #   - HostedZoneTag
+      Name: ws.local
+      # QueryLoggingConfig: 
+      #   CloudWatchLogsLogGroupArn: String
+      VPCs: 
+        - VPCId: !Ref Vpc
+          VPCRegion: !Ref AWS::Region
+  Route53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      # AliasTarget: 
+      #   AliasTarget
+      # CidrRoutingConfig: 
+      #   CidrRoutingConfig
+      # Comment: String
+      # Failover: String
+      # GeoLocation: 
+      #   GeoLocation
+      # HealthCheckId: String
+      HostedZoneId: !Ref Route53HostedZone
+      # HostedZoneName: String
+      # MultiValueAnswer: Boolean
+      Name: web.ws.local
+      Region: !Ref AWS::Region
+      ResourceRecords: 
+        - !GetAtt ApplicationLoadBalancer.DNSName
+      SetIdentifier: id_001
+      TTL: 300
+      Type: CNAME
+      # Weight: Integer
