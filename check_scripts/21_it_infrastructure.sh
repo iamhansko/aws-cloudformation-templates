@@ -1,4 +1,5 @@
 #!/bin/bash
+
 echo -e "\033[33mALB DNS 주소를 입력해주세요.(~.com으로 끝나야 함)\033[0m"
 read alb_dns
 
