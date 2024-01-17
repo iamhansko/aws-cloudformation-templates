@@ -703,13 +703,17 @@ Resources:
       # SecurityGroupEgress: 
       #   - Egress
       SecurityGroupIngress: 
-        - CidrIp: 0.0.0.0/0
+        - FromPort: 22
           IpProtocol: tcp
-          FromPort: 22
+          SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
           ToPort: 22
-        - CidrIp: 0.0.0.0/0
+        - FromPort: 80
           IpProtocol: tcp
-          FromPort: 80
+          SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
+          ToPort: 80
+        - FromPort: 80
+          IpProtocol: tcp
+          SourceSecurityGroupId: !Ref ApplicationLoadBalancerSecurityGroup
           ToPort: 80
       # Tags: 
       #   - Tag
@@ -721,14 +725,14 @@ Resources:
       # LoadBalancerAttributes: 
       #   - LoadBalancerAttribute
       Name: web-cc2021-ap-int
-      Scheme: internet-facing
+      Scheme: internal
       SecurityGroups: 
         - !Ref ApplicationLoadBalancerSecurityGroup
       # SubnetMappings: 
       #   - SubnetMapping
       Subnets: 
-        - !Ref PublicSubnetA
-        - !Ref PublicSubnetB
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
       # Tags: 
       #   - Tag
       Type: application
