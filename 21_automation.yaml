@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "CloudFormation Template"
 
-Parameters:
-  KeyPair: 
-    Description: EC2 Key Pair
-    Type: AWS::EC2::KeyPair::KeyName
+# Parameters:
+#   KeyPair: 
+#     Description: EC2 Key Pair
+#     Type: AWS::EC2::KeyPair::KeyName
 
 Mappings:
   RegionMap:
@@ -14,6 +14,10 @@ Mappings:
       AmazonLinux2023: ami-0bfd23bc25c60d5a1
 
 Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub "key-${AWS::StackId}"
   Ecr:
     Type: AWS::ECR::Repository
     Properties:
@@ -554,7 +558,7 @@ Resources:
                 Provider: CodeCommit
                 Version: 1
               Configuration:
-                RepositoryName: wsi-api-repo
+                RepositoryName: !GetAtt CodeCommit.Name
                 BranchName: main
                 PollForSourceChanges: False
               OutputArtifacts:
