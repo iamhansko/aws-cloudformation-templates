@@ -10,14 +10,29 @@ Mappings:
   RegionMap:
     us-east-1:
       AmazonLinux2023: ami-0005e0cfe09cc9050
-      # create a new Bucket and put /day1-2021/index.html & /day1-2021/app.py (source_code/21_web_service_provisioning/s3.tar), replace S3Bucket name
-      S3Bucket: world-skills-cloud-computing-us-east-1
     ap-northeast-2:
       AmazonLinux2023: ami-0bfd23bc25c60d5a1
-      # create a new Bucket and put /day1-2021/index.html & /day1-2021/app.py (source_code/21_web_service_provisioning/s3.tar), replace S3Bucket name
-      S3Bucket: skills-seoul19990731
 
 Resources:
+  OriginS3Bucket:
+    DeletionPolicy: RetainExceptOnCreate
+    Type: AWS::S3::Bucket
+  OriginS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref OriginS3Bucket
+      PolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Action:
+              - s3:GetObject
+            Effect: Allow
+            Resource: !Sub 'arn:aws:s3:::${OriginS3Bucket}/*'
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Condition:
+              StringEquals:
+                'AWS:SourceArn': !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFront}"
   KeyPair:
     Type: AWS::EC2::KeyPair
     Properties:
@@ -171,6 +186,13 @@ Resources:
         - Key: Name
           Value: wsi-bastion-ec2
       IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      UserData:
+        Fn::Base64:
+            !Sub |
+              #!/bin/bash -xe
+              exec > >(sudo tee /var/log/user-data.log|sudo sh -c "logger -t user-data -s 2>/dev/console") 2>&1
+              aws s3 cp s3://skills-seoul19990731/day1-2021/index.html ./
+              aws s3 cp ./index.html s3://${OriginS3Bucket}/index.html
   BastionEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -436,10 +458,9 @@ Resources:
           - DomainName: 
               !Sub 
                 - '${S3BucketName}.s3.${AWS::Region}.amazonaws.com'
-                - S3BucketName: !FindInMap [RegionMap, !Ref AWS::Region, S3Bucket]
+                - S3BucketName: !Ref OriginS3Bucket
             Id: S3Static
             OriginAccessControlId: !GetAtt CloudFrontOriginAccessControl.Id
-            OriginPath: /day1-2021
             S3OriginConfig:
               OriginAccessIdentity: ''
           - DomainName: !GetAtt ApplicationLoadBalancer.DNSName
