@@ -10,10 +10,8 @@ Mappings:
   RegionMap:
     us-east-1:
       AmazonLinux2023: ami-0005e0cfe09cc9050
-      S3Bucket: world-skills-seoul
     ap-northeast-2:
       AmazonLinux2023: ami-0bfd23bc25c60d5a1
-      S3Bucket: skills-seoul19990731
 
 Resources:
   KeyPair:
