@@ -10,8 +10,12 @@ Mappings:
   RegionMap:
     us-east-1:
       AmazonLinux2023: ami-0005e0cfe09cc9050
+      # create a new Bucket and put /day1-2021/index.html & /day1-2021/app.py (source_code/21_web_service_provisioning/s3.tar), replace S3Bucket name
+      S3Bucket: world-skills-cloud-computing-us-east-1
     ap-northeast-2:
       AmazonLinux2023: ami-0bfd23bc25c60d5a1
+      # create a new Bucket and put /day1-2021/index.html & /day1-2021/app.py (source_code/21_web_service_provisioning/s3.tar), replace S3Bucket name
+      S3Bucket: skills-seoul19990731
 
 Resources:
   KeyPair:
@@ -429,7 +433,10 @@ Resources:
         HttpVersion: http1.1
         IPV6Enabled: False
         Origins: 
-          - DomainName: skills-seoul19990731.s3.ap-northeast-2.amazonaws.com
+          - DomainName: 
+              !Sub 
+                - '${S3BucketName}.s3.${AWS::Region}.amazonaws.com'
+                - S3BucketName: !FindInMap [RegionMap, !Ref AWS::Region, S3Bucket]
             Id: S3Static
             OriginAccessControlId: !GetAtt CloudFrontOriginAccessControl.Id
             OriginPath: /day1-2021

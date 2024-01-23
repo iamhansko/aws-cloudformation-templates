@@ -10,8 +10,10 @@ Mappings:
   RegionMap:
     us-east-1:
       AmazonLinux2023: ami-0005e0cfe09cc9050
+      S3Bucket: world-skills-seoul
     ap-northeast-2:
       AmazonLinux2023: ami-0bfd23bc25c60d5a1
+      S3Bucket: skills-seoul19990731
 
 Resources:
   KeyPair:
@@ -349,48 +351,6 @@ Resources:
           SourceSecurityGroupId: !Ref PublicEc2SecurityGroup
           ToPort: 22
       VpcId: !Ref Vpc
-  Lambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Architectures: 
-        - String
-      Code: 
-        Code
-      CodeSigningConfigArn: String
-      DeadLetterConfig: 
-        DeadLetterConfig
-      Description: String
-      Environment: 
-        Environment
-      EphemeralStorage: 
-        EphemeralStorage
-      FileSystemConfigs: 
-        - FileSystemConfig
-      FunctionName: day3-2-lambda
-      Handler: String
-      ImageConfig: 
-        ImageConfig
-      KmsKeyArn: String
-      Layers: 
-        - String
-      LoggingConfig: 
-        LoggingConfig
-      MemorySize: Integer
-      PackageType: String
-      ReservedConcurrentExecutions: Integer
-      Role: String
-      Runtime: String
-      RuntimeManagementConfig: 
-        RuntimeManagementConfig
-      SnapStart: 
-        SnapStart
-      Tags: 
-        - Tag
-      Timeout: Integer
-      TracingConfig: 
-        TracingConfig
-      VpcConfig: 
-        VpcConfig
   LambdaIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -424,7 +384,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Code: 
-        S3Bucket: skills-seoul19990731
+        S3Bucket: !FindInMap [RegionMap, !Ref AWS::Region, S3Bucket]
         S3Key: day3-2-lambda.zip
       FunctionName: day3-2-lambda
       Role: !GetAtt LambdaIamRole.Arn

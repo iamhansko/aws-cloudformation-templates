@@ -10,8 +10,10 @@ Mappings:
   RegionMap:
     us-east-1:
       AmazonLinux2023: ami-0005e0cfe09cc9050
+      S3Bucket: world-skills-seoul
     ap-northeast-2:
       AmazonLinux2023: ami-0bfd23bc25c60d5a1
+      S3Bucket: skills-seoul19990731
 
 Resources:
   KeyPair:
@@ -363,7 +365,7 @@ Resources:
       Code: 
         BranchName: main
         S3: 
-          Bucket: skills-seoul19990731
+          Bucket: !FindInMap [RegionMap, !Ref AWS::Region, S3Bucket]
           Key: day2-2021-python-app.zip
       RepositoryName: wsi-api-repo
   CodeBuild:
@@ -592,6 +594,7 @@ Resources:
                 - Name: BuildOutput
   CodePipelineArtifactStoreS3Bucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
   CodePipelineIamRole:
     Type: AWS::IAM::Role
     Properties:
