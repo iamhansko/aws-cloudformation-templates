@@ -2,6 +2,11 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: "CloudFormation Template"
 
 Mappings:
+  RegionMap:
+    us-east-1:
+      AmazonLinux2023: ami-0005e0cfe09cc9050
+    ap-northeast-2:
+      AmazonLinux2023: ami-0bfd23bc25c60d5a1
   ResourceMap:
     VpcA:
       Name : vpc-a
@@ -17,6 +22,12 @@ Mappings:
       Name: wsi-igw
     NatGateway:
       Name: wsi-natgw
+    BastionEc2:
+      Name: bastion
+      InstanceType: t3.small
+    ServiceEc2:
+      Name: service
+      InstanceType: t3.small
 
 Resources:
   # VPC_A
@@ -222,3 +233,131 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref VpcBNatGatewayB
       RouteTableId: !Ref VpcBPrivateSubnetBRouteTable
+  KeyPairA:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub "key-a-${AWS::StackId}"
+  BastionA:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionMap, !Ref AWS::Region, AmazonLinux2023]
+      InstanceType: !FindInMap [ResourceMap, BastionEc2, InstanceType]
+      KeyName: !Ref KeyPairA
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref VpcAPublicSubnet
+          GroupSet: 
+            - !Ref BastionASecurityGroup
+      Tags: 
+        - Key: Name
+          Value: !Join ["-", [!FindInMap [ResourceMap, BastionEc2, Name], "a"]]
+  BastionASecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for BastionA EC2 SSH Connection"
+      GroupName: bastion-a-sg
+      SecurityGroupIngress: 
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+      VpcId: !Ref VpcA
+  ServiceA:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionMap, !Ref AWS::Region, AmazonLinux2023]
+      InstanceType: !FindInMap [ResourceMap, ServiceEc2, InstanceType]
+      KeyName: !Ref KeyPairA
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: False
+          DeviceIndex: 0
+          SubnetId: !Ref VpcAPrivateSubnet
+          GroupSet: 
+            - !Ref ServiceASecurityGroup
+      Tags: 
+        - Key: Name
+          Value: !Join ["-", [!FindInMap [ResourceMap, ServiceEc2, Name], "a"]]
+      UserData:
+        Fn::Base64:
+            !Sub |
+              #!/bin/bash -xe
+              exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+              dnf update -y
+              dnf install httpd -y
+              systemctl start httpd
+  ServiceASecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for ServiceA EC2 SSH Connection"
+      GroupName: service-a-sg
+      SecurityGroupIngress: 
+        - SourceSecurityGroupId: !Ref BastionASecurityGroup
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+      VpcId: !Ref VpcA
+  KeyPairB:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub "key-a-${AWS::StackId}"
+  BastionB:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionMap, !Ref AWS::Region, AmazonLinux2023]
+      InstanceType: !FindInMap [ResourceMap, BastionEc2, InstanceType]
+      KeyName: !Ref KeyPairB
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref VpcBPublicSubnet
+          GroupSet: 
+            - !Ref BastionBSecurityGroup
+      Tags: 
+        - Key: Name
+          Value: !Join ["-", [!FindInMap [ResourceMap, BastionEc2, Name], "b"]]
+  BastionBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for BastionB EC2 SSH Connection"
+      GroupName: bastion-b-sg
+      SecurityGroupIngress: 
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+      VpcId: !Ref VpcB
+  ServiceB:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionMap, !Ref AWS::Region, AmazonLinux2023]
+      InstanceType: !FindInMap [ResourceMap, ServiceEc2, InstanceType]
+      KeyName: !Ref KeyPairB
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: False
+          DeviceIndex: 0
+          SubnetId: !Ref VpcBPrivateSubnetB
+          GroupSet: 
+            - !Ref ServiceBSecurityGroup
+      Tags: 
+        - Key: Name
+          Value: !Join ["-", [!FindInMap [ResourceMap, ServiceEc2, Name], "b"]]
+      UserData:
+        Fn::Base64:
+            !Sub |
+              #!/bin/bash -xe
+              exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+              dnf update -y
+              dnf install httpd -y
+              systemctl start httpd
+  ServiceBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for ServiceB EC2 SSH Connection"
+      GroupName: service-b-sg
+      SecurityGroupIngress: 
+        - SourceSecurityGroupId: !Ref BastionBSecurityGroup
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+      VpcId: !Ref VpcB
