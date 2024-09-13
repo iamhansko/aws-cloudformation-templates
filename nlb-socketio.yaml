@@ -11,7 +11,9 @@ Resources:
   KeyPair:
     Type: AWS::EC2::KeyPair
     Properties:
-      KeyName: !Sub "key-${AWS::StackId}"
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
   Vpc:
     Type: AWS::EC2::VPC
     Properties:
