@@ -1,0 +1,1019 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation Template"
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      AmazonLinux2023: ami-0b72821e2f351e396
+      EcsOptimizedAmazonLinux2023: ami-025a8beccff4de554
+    ap-northeast-2:
+      AmazonLinux2023: ami-04ea5b2d3c8ceccf8
+      EcsOptimizedAmazonLinux2023: ami-0856df28f23817b2f
+  ResourceMap:
+    Vpc:
+      Name : stem-vpc
+      CidrBlock: 10.10.0.0/16
+    PublicSubnet:
+      Name: stem-pub
+    PrivateSubnet:
+      Name: stem-priv
+    InternetGateway:
+      Name: stem-igw
+    NatGateway:
+      Name: stem-natgw
+    BastionEc2:
+      Name: stem-bastion
+      InstanceType: t3.small
+    CodePipeline:
+      Name: stem-pipeline
+      Build: stem-build
+      DeployApplication: stem-app
+      DeploymentGroup: stem-dg
+      CloudTrail: codepipeline-source-trail
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsHostnames: True
+      CidrBlock: !FindInMap [ResourceMap, Vpc, CidrBlock]
+      Tags: 
+        - Key : Name
+          Value : !FindInMap [ResourceMap, Vpc, Name]
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: !Select [0, !Cidr [ !GetAtt Vpc.CidrBlock, 16, 8 ]]
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PublicSubnet, Name], "a"]]
+      VpcId: !Ref Vpc
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      CidrBlock: !Select [1, !Cidr [ !GetAtt Vpc.CidrBlock, 16, 8 ]]
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PublicSubnet, Name], "b"]]
+      VpcId: !Ref Vpc
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: !Select [2, !Cidr [ !GetAtt Vpc.CidrBlock, 16, 8 ]]
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PrivateSubnet, Name], "a"]]
+      VpcId: !Ref Vpc
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      CidrBlock: !Select [3, !Cidr [ !GetAtt Vpc.CidrBlock, 16, 8 ]]
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PrivateSubnet, Name], "b"]]
+      VpcId: !Ref Vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !FindInMap [ResourceMap, InternetGateway, Name]
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  NatGatewayAElasticIp:
+    Type: AWS::EC2::EIP
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayAElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, NatGateway, Name], "a"]]
+  NatGatewayBElasticIp:
+    Type: AWS::EC2::EIP
+  NatGatewayB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayBElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnetB
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, NatGateway, Name], "b"]]
+      
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PublicSubnet, Name], "rt"]]
+      VpcId: !Ref Vpc
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnetA
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnetB
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  PrivateSubnetARouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PrivateSubnet, Name], "a", "rt"]]
+      VpcId: !Ref Vpc
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateSubnetARouteTable
+      SubnetId: !Ref PrivateSubnetA
+  PrivateSubnetARoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+      RouteTableId: !Ref PrivateSubnetARouteTable
+  PrivateSubnetBRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PrivateSubnet, Name], "b", "rt"]]
+      VpcId: !Ref Vpc
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateSubnetBRouteTable
+      SubnetId: !Ref PrivateSubnetB
+  PrivateSubnetBRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayB
+      RouteTableId: !Ref PrivateSubnetBRouteTable
+  
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Name: stem-alb
+      Scheme: internet-facing
+      SecurityGroups: 
+        - !Ref ApplicationLoadBalancerSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      Type: application
+  ApplicationLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Application Load Balancer"
+      GroupName: alb-sg
+      SecurityGroupIngress: 
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+      VpcId: !Ref Vpc
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions: 
+        - TargetGroupArn: !Ref TargetGroup1
+          Type: forward
+      LoadBalancerArn: !GetAtt ApplicationLoadBalancer.LoadBalancerArn
+      Port: 80
+      Protocol: HTTP
+  ListenerRule:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref TargetGroup1
+                Weight: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: User-Agent
+            Values:
+              - Mozilla
+      ListenerArn: !Ref Listener
+      Priority: 1
+  TargetGroup1:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: True
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /health
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: 200
+      IpAddressType: ipv4
+      Name: stem-tg1
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      UnhealthyThresholdCount: 4
+      VpcId: !Ref Vpc
+  TargetGroup2:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: True
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /health
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: 200
+      IpAddressType: ipv4
+      Name: stem-tg2
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      UnhealthyThresholdCount: 4
+      VpcId: !Ref Vpc
+  
+  Ecr:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: True
+      RepositoryName: stem-ecr
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    DependsOn: 
+      - Ecr
+      - CodePipelineSourceS3Bucket
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT15M
+    Properties:
+      ImageId: !FindInMap [RegionMap, !Ref AWS::Region, AmazonLinux2023]
+      InstanceType: !FindInMap [ResourceMap, BastionEc2, InstanceType]
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnetA
+          GroupSet: 
+            - !Ref BastionEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: !FindInMap [ResourceMap, BastionEc2, Name]
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      UserData: 
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash -xe
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            dnf update -y
+            dnf install docker -y
+            systemctl start docker
+            systemctl enable docker
+            usermod -aG docker ec2-user
+            newgrp docker
+            echo 'package main
+
+            import (
+                "fmt"
+                "net/http"
+            )
+
+            func health(w http.ResponseWriter, req *http.Request) {
+                fmt.Fprint(w, "OK")
+            }
+
+            func dummy(w http.ResponseWriter, req *http.Request) {
+                fmt.Fprint(w, "BLUE")
+            }
+
+            func main() {
+                http.HandleFunc("/health", health)
+                http.HandleFunc("/v1/dummy", dummy)
+                http.ListenAndServe(":80", nil)
+            }' > main.go
+            echo 'FROM golang:1.16
+            WORKDIR /app
+            COPY main.go .
+            RUN go build main.go
+            EXPOSE 80
+            CMD ["./main"]' > Dockerfile
+            zip src.zip main.go
+            aws s3 cp src.zip s3://${CodePipelineSourceS3Bucket}
+            aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+            IMAGE_TAG=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Ecr}:prototype
+            docker build -t $IMAGE_TAG .
+            docker push $IMAGE_TAG
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Bastion EC2 SSH Connection"
+      GroupName: bastion-sg
+      SecurityGroupIngress: 
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+      VpcId: !Ref Vpc
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      RoleName: Ec2AdminRole
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: Ec2AdminProfile
+      Roles: 
+        - !Ref BastionEc2IamRole
+  BastionEc2ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref BastionEc2
+
+  EcsAutoScalingGroupIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      RoleName: EcsAutoScalingGroupIamRole
+  EcsAutoScalingGroupProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: EcsAutoScalingGroupProfile
+      Roles: 
+        - !Ref EcsAutoScalingGroupIamRole
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: stem-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: DEFAULT
+  EcsLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn: EcsCluster
+    Properties:
+      LaunchTemplateData:
+        ImageId: !FindInMap [RegionMap, !Ref AWS::Region, EcsOptimizedAmazonLinux2023]
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: 
+              - Key: Name
+                Value: ecs-asg-instance
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            DeleteOnTermination: true
+            Groups: 
+              - !Ref EcsAutoScalingGroupSecurityGroup
+        KeyName: !Ref KeyPair
+        IamInstanceProfile: 
+          Arn: !GetAtt EcsAutoScalingGroupProfile.Arn
+        UserData:
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash -xe
+              exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+              mkdir -p /etc/ecs
+              echo "ECS_CLUSTER=stem-cluster" > /etc/ecs/ecs.config
+  EcsAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: EcsCluster
+    Properties:
+      MinSize: 1
+      MaxSize: 8
+      DesiredCapacity: 2
+      Cooldown: 0
+      MixedInstancesPolicy:
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref EcsLaunchTemplate
+            Version: !GetAtt EcsLaunchTemplate.LatestVersionNumber
+          Overrides:
+            - InstanceType: t3.micro
+        InstancesDistribution:
+          OnDemandBaseCapacity: 0
+          OnDemandPercentageAboveBaseCapacity: 0
+          SpotAllocationStrategy: price-capacity-optimized
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+  EcsAutoScalingGroupSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for ASG
+      GroupName: asg-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - FromPort: 22
+          IpProtocol: tcp
+          SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
+          ToPort: 22
+  EcsCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: CapacityProvider
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref EcsAutoScalingGroup
+        ManagedScaling:
+          InstanceWarmupPeriod: 60
+          Status: ENABLED
+          TargetCapacity: 100
+        ManagedTerminationProtection: DISABLED
+  ClusterCPAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    DependsOn: EcsCluster
+    Properties:
+      Cluster: !Ref EcsCluster
+      CapacityProviders:
+        - !Ref EcsCapacityProvider
+      DefaultCapacityProviderStrategy:
+        - Base: 0
+          Weight: 1
+          CapacityProvider: !Ref EcsCapacityProvider
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: BastionEc2
+    Properties:
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: golang-app
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Ecr}:prototype
+          Essential: true
+          PortMappings:
+            - HostPort: 80
+              Protocol: tcp
+              ContainerPort: 80
+          HealthCheck:
+            Command: 
+              - "CMD-SHELL"
+              - "curl -f http://localhost/health || exit 1"
+      NetworkMode: awsvpc
+      Cpu: '256'
+      Memory: '512'
+      Family: stem-td
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for ECS
+      GroupName: stem-ecs-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - FromPort: 80
+          ToPort: 80
+          IpProtocol: tcp
+          SourceSecurityGroupId: !Ref ApplicationLoadBalancerSecurityGroup
+        - FromPort: 443
+          ToPort: 443
+          IpProtocol: tcp
+          SourceSecurityGroupId: !Ref ApplicationLoadBalancerSecurityGroup
+  EcsTaskCloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/stem-td
+  EcsService:
+    Type: AWS::ECS::Service
+    DependsOn: 
+      - Listener
+      - EcsTaskCloudWatchLogGroup
+    Properties:
+      Cluster: stem-cluster
+      TaskDefinition: !Ref EcsTaskDefinition
+      ServiceName: stem-svc
+      SchedulingStrategy: REPLICA
+      DesiredCount: 2
+      LoadBalancers:
+        - ContainerName: golang-app
+          ContainerPort: 80
+          TargetGroupArn: !Ref TargetGroup1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref EcsSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnetA
+            - !Ref PrivateSubnetB
+      DeploymentController:
+        Type: CODE_DEPLOY
+      ServiceConnectConfiguration:
+        Enabled: false
+      PlacementStrategies:
+        - Field: attribute:ecs.availability-zone
+          Type: spread
+        - Field: instanceId
+          Type: spread
+      EnableECSManagedTags: true
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref EcsCapacityProvider
+          Base: 0
+          Weight: 1
+
+  CodePipelineSourceS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts: 
+        Type: CODEPIPELINE
+      Environment: 
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+      Name: !FindInMap [ResourceMap, CodePipeline, Build]
+      ServiceRole: !Ref CodeBuildIamRole
+      Source: 
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            variables:
+              AWS_DEFAULT_REGION: ${AWS::Region}
+              AWS_ACCOUNT_ID: ${AWS::AccountId}
+              IMAGE_REPO_NAME: ${Ecr}
+              CAPACITY_PROVIDER: ${EcsCapacityProvider}
+          phases:
+            pre_build:
+              commands:
+                - ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime
+                # - |
+                #   echo 'package main
+                #   import (
+                #       "fmt"
+                #       "net/http"
+                #   )
+                #   func health(w http.ResponseWriter, req *http.Request) {
+                #       fmt.Fprint(w, "OK")
+                #   }
+                #   func dummy(w http.ResponseWriter, req *http.Request) {
+                #       fmt.Fprint(w, "BLUE")
+                #   }
+                #   func main() {
+                #       http.HandleFunc("/health", health)
+                #       http.HandleFunc("/v1/dummy", dummy)
+                #       http.ListenAndServe(":80", nil)
+                #   }' > main.go
+                - | 
+                  echo 'FROM golang:1.16
+                  WORKDIR /app
+                  COPY . .
+                  RUN go build main.go
+                  EXPOSE 80
+                  CMD ["./main"]' > Dockerfile
+            build:
+              commands:
+                - IMAGE_VERSION=$(LC_TIME=ko_KR.UTF-8 date +'%Y-%m-%d.%H.%M.%S')
+                - IMAGE_TAG=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_VERSION
+                # Enable DockerHub Login if you meet the error "toomanyrequests"
+                # - DOCKERHUB_USERNAME=
+                # - DOCKERHUB_PASSWORD=
+                # - echo "$DOCKERHUB_PASSWORD" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+                - docker build -t $IMAGE_TAG .
+                - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+                - docker push $IMAGE_TAG
+            post_build:
+              commands:
+                - IMAGE_VERSION=$(echo $(aws ecr describe-images --repository-name $IMAGE_REPO_NAME --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]') | tr -d '"')
+                - FAMILY="stem-td"
+                - EXECUTION_ROLE_ARN="arn:aws:iam::$AWS_ACCOUNT_ID:role/${EcsTaskExecutionRole}"
+                - CONTAINER_NAME="golang-app"
+                - CONTAINER_PORT="80"
+                - CONTAINER_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_VERSION"
+                - |
+                  jq -n --arg FAMILY $FAMILY --arg EXECUTION_ROLE_ARN $EXECUTION_ROLE_ARN --arg CONTAINER_NAME $CONTAINER_NAME --arg CONTAINER_IMAGE $CONTAINER_IMAGE --arg AWS_DEFAULT_REGION $AWS_DEFAULT_REGION \
+                    '{ "family":$FAMILY, "executionRoleArn":$EXECUTION_ROLE_ARN, "networkMode":"awsvpc", "cpu":"256", "memory":"512", "containerDefinitions":[{"healthCheck":{"command":["CMD-SHELL","curl -f http://localhost/health || exit 1"],"interval":10,"timeout":5,"retries":3,"startPeriod": 0},"logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"/ecs/stem-td","awslogs-region":$AWS_DEFAULT_REGION,"awslogs-stream-prefix":"ecs"}},"name":$CONTAINER_NAME,"image":$CONTAINER_IMAGE,"portMappings":[{"containerPort":80,"hostPort":80,"protocol":"tcp"}]}] }' \
+                    > task-definition.json
+                - TASK_DEFINITION_JSON=$(aws ecs register-task-definition --cli-input-json file://task-definition.json)
+                - TASK_DEFINITION_ARN=$(echo $TASK_DEFINITION_JSON | jq -r '.taskDefinition .taskDefinitionArn')
+                - >
+                  jq -n --arg TASK_DEFINITION_ARN $TASK_DEFINITION_ARN --arg CONTAINER_NAME $CONTAINER_NAME --arg CONTAINER_PORT $CONTAINER_PORT --arg CAPACITY_PROVIDER $CAPACITY_PROVIDER \
+                  '{"version": 0.0, "Resources": [{"TargetService": {"Type": "AWS::ECS::Service", "Properties": {"TaskDefinition": $TASK_DEFINITION_ARN, "LoadBalancerInfo": {"ContainerName": $CONTAINER_NAME, "ContainerPort": $CONTAINER_PORT}, "CapacityProviderStrategy": [{"Base":0,"CapacityProvider":$CAPACITY_PROVIDER,"Weight":1}]}}}]}' \
+                  > appspec.json
+          artifacts:
+            files:
+              - appspec.json
+            discard-paths: yes
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 15
+  CodeBuildIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - logs:PutLogEvents
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:GetRepositoryPolicy
+                  - ecr:DescribeRepositories
+                  - ecr:ListImages
+                  - ecr:DescribeImages
+                  - ecr:BatchGetImage
+                  - ecr:GetLifecyclePolicy
+                  - ecr:GetLifecyclePolicyPreview
+                  - ecr:ListTagsForResource
+                  - ecr:DescribeImageScanFindings
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecs:*
+                  - iam:PassRole
+                Resource: '*'
+      RoleName: CodeBuildRole
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !FindInMap [ResourceMap, CodePipeline, DeployApplication]
+      ComputePlatform: ECS
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn:
+      - EcsService
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      AutoRollbackConfiguration: 
+        Enabled: True
+        Events: 
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+          - DEPLOYMENT_STOP_ON_REQUEST
+      DeploymentGroupName: !FindInMap [ResourceMap, CodePipeline, DeploymentGroup]
+      ServiceRoleArn: !GetAtt CodeDeployIamRole.Arn
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentStyle:
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+        DeploymentType: BLUE_GREEN
+      ECSServices:
+        - ClusterName: !Ref EcsCluster
+          ServiceName: !GetAtt EcsService.Name
+      LoadBalancerInfo: 
+        TargetGroupPairInfoList:
+          - ProdTrafficRoute:
+              ListenerArns:
+                - !GetAtt Listener.ListenerArn
+            TargetGroups:
+              - Name: !GetAtt TargetGroup1.TargetGroupName
+              - Name: !GetAtt TargetGroup2.TargetGroupName
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption: 
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+        TerminateBlueInstancesOnDeploymentSuccess: 
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: 0
+  CodeDeployIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codedeploy.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CodeDeployPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:CreateTaskSet
+                  - ecs:UpdateServicePrimaryTaskSet
+                  - ecs:DeleteTaskSet
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:ModifyListener
+                  - elasticloadbalancing:DescribeRules
+                  - elasticloadbalancing:ModifyRule
+                  - lambda:InvokeFunction
+                  - cloudwatch:DescribeAlarms
+                  - sns:Publish
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: '*'
+                Condition:
+                  StringLike:
+                    "iam:PassedToService" : "ecs-tasks.amazonaws.com"
+      RoleName: CodeDeployRole
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !FindInMap [ResourceMap, CodePipeline, Name]
+      PipelineType: V2
+      ArtifactStore:
+        Location: !Ref CodePipelineArtifactStoreS3Bucket
+        Type: S3
+      RoleArn: !GetAtt CodePipelineIamRole.Arn
+      Stages: 
+        - Name: SourceStage
+          Actions: 
+            - Name: SourceAction
+              ActionTypeId: 
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: 1
+              Configuration:
+                S3Bucket: !Ref CodePipelineSourceS3Bucket
+                S3ObjectKey: src.zip
+                PollForSourceChanges: 'false'
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: BuildStage
+          Actions: 
+            - Name: BuildAction
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref CodeBuild
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+        - Name: DeployStage
+          Actions: 
+            - Name: DeployAction
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeploy
+                Version: 1
+              Configuration:
+                ApplicationName: !Ref CodeDeployApplication
+                DeploymentGroupName: !Ref CodeDeployDeploymentGroup
+              InputArtifacts:
+                - Name: BuildOutput
+  CodePipelineArtifactStoreS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+  CodePipelineIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource:
+                  - !Sub 
+                    - "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}"
+                    - CodePipeline: !FindInMap [ResourceMap, CodePipeline, Name]
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource:
+                  - !GetAtt CodeBuild.Arn
+              - Effect: Allow
+                Action:
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetDeployment
+                Resource:
+                  - !Sub 
+                      - "arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${CodeDeployApplication}/${CodeDeployDeploymentGroup}"
+                      - CodeDeployApplication: !FindInMap [ResourceMap, CodePipeline, DeployApplication]
+                        CodeDeployDeploymentGroup: !FindInMap [ResourceMap, CodePipeline, DeploymentGroup]
+              - Effect: Allow
+                Action:
+                  - codedeploy:GetDeploymentConfig
+                Resource:
+                  - !Sub "arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentconfig:CodeDeployDefault.ECSAllAtOnce"
+              - Effect: Allow
+                Action:
+                  - codedeploy:RegisterApplicationRevision
+                  - codedeploy:GetApplicationRevision
+                Resource:
+                  - !Sub 
+                      - "arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:application:${CodeDeployApplication}"
+                      - CodeDeployApplication: !FindInMap [ResourceMap, CodePipeline, DeployApplication]
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource: "*"
+      RoleName: CodePipelineRole
+  CloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: >-
+        CodePipeline Source Stage에서 변경이 발생하면 파이프라인을 자동으로 시작하는 Amazon
+        CloudWatch Events 규칙입니다. 이 규칙을 삭제하면 해당 파이프라인에서 변경 사항이 감지되지 않습니다. 자세한 정보:
+        http://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-about-starting.html
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - s3.amazonaws.com
+          eventName:
+            - CopyObject
+            - PutObject
+            - CompleteMultipartUpload
+          requestParameters:
+            bucketName:
+              - !Ref CodePipelineSourceS3Bucket
+            key:
+              - src.zip
+      Name: codepipeline-event-rule
+      State: ENABLED
+      Targets:
+        - Id: codepipeline-codepipeline
+          Arn: !Sub 
+            - "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}"
+            - CodePipeline: !FindInMap [ResourceMap, CodePipeline, Name]
+          RoleArn: !GetAtt CloudWatchEventRuleIamRole.Arn
+  CloudWatchEventRuleIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CloudWatchEventRulePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource:
+                  - !Sub 
+                      - "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}"
+                      - CodePipeline: !FindInMap [ResourceMap, CodePipeline, Name]
+      RoleName: CloudWatchEventRuleRole
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn:
+      - CloudTrailLogsBucket
+      - CloudTrailLogsBucketPolicy
+    Properties:
+      TrailName: !FindInMap [ResourceMap, CodePipeline, CloudTrail]
+      EventSelectors: 
+        - DataResources: 
+            - Type: AWS::S3::Object
+              Values: 
+                - !Sub
+                  - "${BucketArn}/src.zip"
+                  - BucketArn: !GetAtt CodePipelineSourceS3Bucket.Arn
+          ReadWriteType: WriteOnly
+      IsLogging: true
+      S3BucketName: !Ref CloudTrailLogsBucket
+  CloudTrailLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+  CloudTrailLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action:
+              - 's3:GetBucketAcl'
+            Effect: Allow
+            Resource: !GetAtt CloudTrailLogsBucket.Arn
+            Principal:
+              Service: 'cloudtrail.amazonaws.com'
+            Condition:
+              StringEquals:
+                'aws:SourceArn': !Sub 
+                  - 'arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${CloudTrailName}'
+                  - CloudTrailName: !FindInMap [ResourceMap, CodePipeline, CloudTrail]
+          - Action:
+              - 's3:PutObject'
+            Effect: 'Allow'
+            Resource: !Sub
+              - '${BucketArn}/AWSLogs/${AWS::AccountId}/*'
+              - BucketArn: !GetAtt CloudTrailLogsBucket.Arn
+            Principal:
+              Service: 'cloudtrail.amazonaws.com'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+                'aws:SourceArn': !Sub 
+                  - 'arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${CloudTrailName}'
+                  - CloudTrailName: !FindInMap [ResourceMap, CodePipeline, CloudTrail]
+
+
+
