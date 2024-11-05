@@ -336,7 +336,7 @@ Resources:
             mkdir -p /home/ec2-user/bin
             curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-05-12/bin/linux/amd64/kubectl
             chmod +x kubectl
-            cp kubectl /home/ec2-user/bin/kubectl
+            mv kubectl /home/ec2-user/bin/kubectl
             export PATH=/home/ec2-user/bin:$PATH
             echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
             echo "alias k=kubectl" >>~/.bashrc
