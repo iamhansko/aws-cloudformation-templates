@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: app-fargate
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: curl-loop
+  namespace: app-fargate
+spec:
+  containers:
+  - name: curl-loop
+    image: curlimages/curl
+    # Edit NGINX_POD_IP
+    command: ["sh", "-c", "while true; do curl -s -o /dev/null -w '%{http_code}\n' NGINX_POD_IP; sleep 3; done"]
+  restartPolicy: Always
