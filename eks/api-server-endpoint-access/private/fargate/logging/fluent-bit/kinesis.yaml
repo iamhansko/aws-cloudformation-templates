@@ -332,12 +332,21 @@ Resources:
               name: aws-logging
               namespace: aws-observability
             data:
+              flb_log_cw: 'false'
+              filters.conf: |
+                [FILTER]
+                    Name kubernetes
+                    Match kube.*
+                    Merge_Log On
+                    Keep_Log Off
+                    Buffer_Size 0
+                    Kube_Meta_Cache_TTL 300s
               output.conf: |
                 [OUTPUT]
-                  Name  kinesis_firehose
+                  Name  kinesis_streams
                   Match *
                   region ${AWS::Region}
-                  delivery_stream ${Firehose}" > /home/ec2-user/manifests/configmap.yaml
+                  stream ${KinesisDataStream}" > /home/ec2-user/manifests/configmap.yaml
             kubectl apply -f /home/ec2-user/manifests/configmap.yaml
             kubectl create ns app-fargate
             echo "apiVersion: v1
@@ -345,6 +354,8 @@ Resources:
             metadata:
               name: web
               namespace: app-fargate
+              labels:
+                app: web
             spec:
               containers:
               - name: nginx
@@ -354,6 +365,8 @@ Resources:
             metadata:
               name: stress
               namespace: app-fargate
+              labels:
+                app: stress
             spec:
               containers:
               - name: curl-loop
@@ -527,82 +540,21 @@ Resources:
               - Sid: FirehoseAccess
                 Effect: Allow
                 Action:
-                  - 'firehose:PutRecordBatch'
+                  - kinesis:PutRecords
+                  # - firehose:PutRecordBatch
+                  # - es:*
+                  # - logs:CreateLogStream
+                  # - logs:CreateLogGroup
+                  # - logs:DescribeLogStreams
+                  # - logs:PutLogEvents
+                  # - logs:PutRetentionPolicy
                 Resource: '*'
   
-  Firehose:
-    Type: AWS::KinesisFirehose::DeliveryStream
+  KinesisDataStream:
+    Type: AWS::Kinesis::Stream
     Properties:
-      DeliveryStreamName: firehose-deliverystream
-      DeliveryStreamType: DirectPut
-      S3DestinationConfiguration: 
-        BucketARN: !GetAtt DestinationS3Bucket.Arn
-        RoleARN: !GetAtt FirehoseIamRole.Arn
-  FirehoseIamRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - firehose.amazonaws.com
-            Action:
-              - "sts:AssumeRole"
-      Policies:
-        - PolicyName: FargatePodExecutionFirehosePolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: S3Access
-                Effect: Allow
-                Action:
-                  - s3:AbortMultipartUpload
-                  - s3:GetBucketLocation
-                  - s3:GetObject
-                  - s3:ListBucket
-                  - s3:ListBucketMultipartUploads
-                  - s3:PutObject
-                Resource:
-                  - !Sub 'arn:aws:s3:::${DestinationS3Bucket}'
-                  - !Sub 'arn:aws:s3:::${DestinationS3Bucket}/*'
-              - Sid: KinesisAccess
-                Effect: Allow
-                Action:
-                  - "kinesis:DescribeStream"
-                  - "kinesis:GetShardIterator"
-                  - "kinesis:GetRecords"
-                  - "kinesis:ListShards"
-                Resource:
-                  - !Sub "arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/*"
-              - Sid: KmsAccess
-                Effect: Allow
-                Action:
-                  - "kms:Decrypt"
-                  - "kms:GenerateDataKey"
-                Resource:
-                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*"
-                Condition:
-                  StringEquals:
-                    "kms:ViaService": !Sub "s3.${AWS::Region}.amazonaws.com"
-                  StringLike:
-                    "kms:EncryptionContext:aws:s3:arn": !Sub "arn:aws:s3:::${DestinationS3Bucket}/*"
-              - Sid: CloudWatchAccess
-                Effect: Allow
-                Action:
-                  - "logs:PutLogEvents"
-                Resource:
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*:log-stream:*"
-              - Sid: LambdaAccess
-                Effect: Allow
-                Action:
-                  - "lambda:InvokeFunction"
-                  - "lambda:GetFunctionConfiguration" 
-                Resource:
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*:*"
-  DestinationS3Bucket:
-    Type: AWS::S3::Bucket
+      StreamModeDetails:
+        StreamMode: ON_DEMAND
 
 Outputs:
   BastionEc2PublicIP:
