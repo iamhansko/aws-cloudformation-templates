@@ -342,7 +342,6 @@ Resources:
   BastionEc2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
-      InstanceProfileName: Ec2AdminProfile
       Roles: 
         - !Ref BastionEc2IamRole
   AWSLoadBalancerControllerIAMPolicy:
