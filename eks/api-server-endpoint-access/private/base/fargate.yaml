@@ -442,22 +442,54 @@ Resources:
       PrincipalArn: !GetAtt BastionEc2IamRole.Arn
       Type: STANDARD
   
-  FargateProfile:
+  DefaultFargateProfile:
     Type: AWS::EKS::FargateProfile
     Properties:
       ClusterName: !Ref EksCluster
-      FargateProfileName: app-fargate
+      FargateProfileName: default-fargate
       PodExecutionRoleArn: !GetAtt FargatePodExecutionRole.Arn
       Subnets: 
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB
         - !Ref PrivateSubnetC
       Selectors: 
-        - Namespace: app-fargate
+        - Namespace: default
           # Labels: 
           #     - Key: String
           #       Value: String
-  FargatePodExecutionRole:
+  DefaultFargatePodExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks-fargate-pods.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+            Condition:
+              ArnLike:
+                "aws:SourceArn": !Sub "arn:aws:eks:${AWS::Region}:${AWS::AccountId}:fargateprofile/${EksCluster}/*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy
+  KubesystemFargateProfile:
+    Type: AWS::EKS::FargateProfile
+    Properties:
+      ClusterName: !Ref EksCluster
+      FargateProfileName: kubesystem-fargate
+      PodExecutionRoleArn: !GetAtt FargatePodExecutionRole.Arn
+      Subnets: 
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+        - !Ref PrivateSubnetC
+      Selectors: 
+        - Namespace: kube-system
+          # Labels: 
+          #     - Key: String
+          #       Value: String
+  KubesystemFargatePodExecutionRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
