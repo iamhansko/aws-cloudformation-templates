@@ -447,7 +447,7 @@ Resources:
     Properties:
       ClusterName: !Ref EksCluster
       FargateProfileName: default-fargate
-      PodExecutionRoleArn: !GetAtt FargatePodExecutionRole.Arn
+      PodExecutionRoleArn: !GetAtt DefaultFargatePodExecutionRole.Arn
       Subnets: 
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB
@@ -476,10 +476,12 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy
   KubesystemFargateProfile:
     Type: AWS::EKS::FargateProfile
+    DependsOn:
+      - DefaultFargateProfile
     Properties:
       ClusterName: !Ref EksCluster
       FargateProfileName: kubesystem-fargate
-      PodExecutionRoleArn: !GetAtt FargatePodExecutionRole.Arn
+      PodExecutionRoleArn: !GetAtt KubesystemFargatePodExecutionRole.Arn
       Subnets: 
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB
