@@ -1,0 +1,40 @@
+# https://docs.aws.amazon.com/eks/latest/userguide/create-storage-class.html
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.eks.amazonaws.com
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: gp3
+  encrypted: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nginx-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: app
+    image: nginx
+    volumeMounts:
+    - name: storage
+      mountPath: /usr/share/nginx/html
+  volumes:
+  - name: storage
+    persistentVolumeClaim:
+      claimName: nginx-pvc
