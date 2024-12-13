@@ -332,6 +332,10 @@ Resources:
           FromPort: 22
           IpProtocol: tcp
           ToPort: 22
+        - CidrIp: 0.0.0.0/0
+          FromPort: 8000
+          IpProtocol: tcp
+          ToPort: 8000
       VpcId: !Ref Vpc
       Tags:
         - Key: Name
@@ -507,3 +511,8 @@ Resources:
       ClusterName: !Ref EksCluster
       PrincipalArn: !GetAtt BastionEc2IamRole.Arn
       Type: STANDARD
+
+Outputs:
+  BastionEc2PublicIP:
+    Description: "Public IP Address of the VS Code Server EC2 instance"
+    Value: !Sub "http://${BastionEc2.PublicIp}:8000"
