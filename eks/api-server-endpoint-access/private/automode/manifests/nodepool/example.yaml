@@ -1,19 +1,19 @@
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
-  labels:
-    app.kubernetes.io/managed-by: eks
+  # labels:
+  #   app.kubernetes.io/managed-by: eks
   name: custom
 spec:
-  disruption:
-    budgets:
-    - nodes: 10%
-    consolidateAfter: 30s
-    consolidationPolicy: WhenEmptyOrUnderutilized
+  # disruption:
+  #   budgets:
+  #   - nodes: 10%
+  #   consolidateAfter: 30s
+  #   consolidationPolicy: WhenEmptyOrUnderutilized
   template:
     metadata: {}
     spec:
-      expireAfter: 336h
+      # expireAfter: 336h
       nodeClassRef:
         group: eks.amazonaws.com
         kind: NodeClass
@@ -39,4 +39,4 @@ spec:
         operator: In
         values:
         - linux
-      terminationGracePeriod: 24h0m0s
+      # terminationGracePeriod: 24h0m0s
