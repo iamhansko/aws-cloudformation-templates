@@ -391,19 +391,20 @@ Resources:
           - !Ref PrivateSubnetB
           - !Ref PrivateSubnetC
       RoleArn: !GetAtt EksAutoClusterRole.Arn
-      # ComputeConfig:
-      #   Enabled: true
-      #   NodePools: 
-      #     - general-purpose
-      #     - system
-      #   NodeRoleArn: !GetAtt EksAutoNodeRole.Arn
-      # KubernetesNetworkConfig:
-      #   ElasticLoadBalancing: 
-      #     Enabled: true
-      #   IpFamily: ipv4
-      #   ServiceIpv4Cidr: 10.100.0.0/16 # or 172.20.0.0/16
-      # BlockStorage:
-      #   Enabled: true
+      ComputeConfig:
+        Enabled: true
+        NodePools: 
+          - general-purpose
+          - system
+        NodeRoleArn: !GetAtt EksAutoNodeRole.Arn
+      KubernetesNetworkConfig:
+        ElasticLoadBalancing: 
+          Enabled: true
+        IpFamily: ipv4
+        ServiceIpv4Cidr: 10.100.0.0/16 # or 172.20.0.0/16
+      StorageConfig:
+        BlockStorage:
+          Enabled: true
   EksClusterSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
