@@ -35,7 +35,6 @@ Resources:
       KeyName: !Sub
         - "key-${Id}"
         - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
-  
   Vpc:
     Type: AWS::EC2::VPC
     Properties:
@@ -369,7 +368,7 @@ Resources:
       AccessConfig: 
         AuthenticationMode: API_AND_CONFIG_MAP
         BootstrapClusterCreatorAdminPermissions: true
-      BootstrapSelfManagedAddons: true
+      BootstrapSelfManagedAddons: false
       Logging: 
         ClusterLogging: 
           EnabledTypes: 
@@ -428,7 +427,6 @@ Resources:
       ClusterName: !Ref EksCluster
       PrincipalArn: !GetAtt BastionEc2IamRole.Arn
       Type: STANDARD
-
   EksAutoClusterRole:
     Type: AWS::IAM::Role
     Properties:
@@ -463,7 +461,22 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly
         - arn:aws:iam::aws:policy/AmazonEKSWorkerNodeMinimalPolicy
-
+  KubeProxyAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: kube-proxy
+      ClusterName: !Ref EksCluster
+  CoreDNSAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: coredns
+      ClusterName: !Ref EksCluster
+  PodIdentityAgentAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: eks-pod-identity-agent
+      ClusterName: !Ref EksCluster
+      
 Outputs:
   BastionEc2PublicIP:
     Description: "Public IP Address of the VS Code Server EC2 instance"

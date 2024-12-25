@@ -1,27 +1,32 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "CloudFormation Template"
 
+Parameters:
+  KubernetesVersion:
+    Description: EKS Cluster Kubernetes Version (1.XX)
+    Type: String
+    Default: "1.31"
+    AllowedValues: ["1.24", "1.25", "1.26", "1.27", "1.28", "1.29", "1.30", "1.31", "1.32"]
+  AmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+
 Mappings:
-  RegionMap:
-    us-east-1:
-      AmazonLinux2023: ami-0b72821e2f351e396
-    ap-northeast-2:
-      AmazonLinux2023: ami-04ea5b2d3c8ceccf8
   ResourceMap:
     Vpc:
-      Name : stem-vpc
-      CidrBlock: 10.0.0.0/16
+      Name : eks-vpc
+      CidrBlock: 192.168.0.0/16
     PublicSubnet:
-      Name: stem-public
+      Name: eks-public
     PrivateSubnet:
-      Name: stem-private
+      Name: eks-private
     InternetGateway:
-      Name: stem-igw
+      Name: eks-igw
     NatGateway:
-      Name: stem-natgw
+      Name: eks-natgw
     BastionEc2:
-      Name: stem-bastion
-      InstanceType: t3.small #c5.large
+      Name: eks-bastion
+      InstanceType: t3.small
 
 Resources:
   KeyPair:
@@ -244,7 +249,7 @@ Resources:
         Count: '1'                
         Timeout: PT20M
     Properties:
-      ImageId: !FindInMap [RegionMap, !Ref AWS::Region, AmazonLinux2023]
+      ImageId: !Ref AmiId
       InstanceType: !FindInMap [ResourceMap, BastionEc2, InstanceType]
       KeyName: !Ref KeyPair
       NetworkInterfaces: 
@@ -263,6 +268,40 @@ Resources:
           !Sub |
             #!/bin/bash
             dnf update -y
+            dnf install -y git
+            dnf groupinstall -y "Development Tools"
+            dnf install -y python3.12
+            dnf install -y python3-pip
+            ln -s /usr/bin/python3.12 /usr/bin/python
+
+            wget https://github.com/coder/code-server/releases/download/v4.93.1/code-server-4.93.1-linux-amd64.tar.gz
+            tar -xzf code-server-4.93.1-linux-amd64.tar.gz
+            mv code-server-4.93.1-linux-amd64 /usr/local/lib/code-server
+            ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+
+            mkdir -p /home/ec2-user/.config/code-server
+            cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+            bind-addr: 0.0.0.0:8000
+            auth: none
+            cert: false
+            EOF
+            chown -R ec2-user:ec2-user /home/ec2-user/.config
+            
+            cat <<EOF > /etc/systemd/system/code-server.service
+            [Unit]
+            Description=VS Code Server
+            After=network.target
+            [Service]
+            Type=simple
+            User=ec2-user
+            ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+            Restart=always
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl daemon-reload
+            systemctl enable code-server
+            systemctl start code-server
 
             sudo -Eu ec2-user bash << 'EOF'
             cd /home/ec2-user
@@ -282,12 +321,11 @@ Resources:
             sudo mv /tmp/eksctl /usr/local/bin
             aws configure set region ${AWS::Region}
 
-            sudo dnf install -y git
             curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
             chmod 700 /home/ec2-user/get_helm.sh
             /home/ec2-user/get_helm.sh
 
-            sleep 10
+            sleep 5
             eksctl create iamserviceaccount \
             --cluster=${EksCluster} \
             --namespace=kube-system \
@@ -304,26 +342,23 @@ Resources:
             --set region=${AWS::Region} \
             --set vpcId=${Vpc}
             kubectl rollout status -n kube-system deploy aws-load-balancer-controller
-            sleep 10
+            sleep 5
 
             kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
-            
+
             git clone https://codeberg.org/hjacobs/kube-ops-view.git
             cd kube-ops-view/
             kubectl apply -k deploy
-            kubectl patch svc kube-ops-view -p "{\"spec\": {\"type\": \"LoadBalancer\"}}"
+            kubectl patch svc kube-ops-view -p '{"metadata": {"annotations": {"service.beta.kubernetes.io/aws-load-balancer-nlb-target-type": "ip", "service.beta.kubernetes.io/aws-load-balancer-scheme":"internet-facing", "service.beta.kubernetes.io/aws-load-balancer-security-groups":"${NlbServiceSecurityGroup}"}}, "spec": {"type": "LoadBalancer", "loadBalancerClass": "service.k8s.aws/nlb"}}'
+            
             EOF
+
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
   BastionEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: "Security Group for Bastion EC2 SSH Connection"
       GroupName: bastion-sg
-      SecurityGroupIngress: 
-        - CidrIp: 0.0.0.0/0
-          FromPort: 22
-          IpProtocol: tcp
-          ToPort: 22
       VpcId: !Ref Vpc
       Tags:
         - Key: Name
@@ -341,7 +376,7 @@ Resources:
             Action:
               - 'sts:AssumeRole'
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AdministratorAccess
+        - arn:aws:iam::aws:policy/PowerUserAccess
   BastionEc2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -387,11 +422,19 @@ Resources:
               - "shield:DeleteProtection"
             Resource: "*"
       ManagedPolicyName: AWSLoadBalancerControllerIAMPolicy
+  NlbServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for NLB"
+      GroupName: nlb-sg
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: nlb-sg
 
   EksCluster:
     Type: AWS::EKS::Cluster
     Properties:
-      Name: stem-cluster
       AccessConfig: 
         AuthenticationMode: API_AND_CONFIG_MAP
         BootstrapClusterCreatorAdminPermissions: true
@@ -407,12 +450,8 @@ Resources:
       ResourcesVpcConfig: 
         EndpointPrivateAccess: true
         EndpointPublicAccess: false
-        # PublicAccessCidrs:
-        #   - !Sub
-        #     - "${PublicIp}/32"
-        #     - PublicIp: !GetAtt BastionEc2ElasticIP.PublicIp
         SecurityGroupIds: 
-          - !Ref EksClusterSecurityGroup
+          - !Ref KubectlSecurityGroup
         SubnetIds: 
           - !Ref PublicSubnetA
           - !Ref PublicSubnetB
@@ -421,22 +460,22 @@ Resources:
           - !Ref PrivateSubnetB
           - !Ref PrivateSubnetC
       RoleArn: !GetAtt EksClusterIamRole.Arn
-      # UpgradePolicy: 
-      #   SupportType: String
-      # Version: String
-      # KubernetesNetworkConfig: 
-      #   IpFamily: ipv4
-      #   ServiceIpv4Cidr: 10.0.0.0/16
-      #   ServiceIpv6Cidr: String
-      # EncryptionConfig: 
-      #   - Provider: 
-      #       KeyArn: String
-      #     Resources: 
-      #       - String
-  AppNodeGroup:
+  KubectlSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for EKS Cluster Connection"
+      GroupName: kubectl-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: kubectl-sg
+  ManagedNodeGroup:
     Type: AWS::EKS::Nodegroup
     Properties:
-      NodegroupName: stem-app
+      NodegroupName: app-mng
       AmiType: AL2023_x86_64_STANDARD
       InstanceTypes: 
         - t3.medium #c5.large
@@ -444,7 +483,7 @@ Resources:
       ClusterName: !Ref EksCluster
       ForceUpdateEnabled: true
       Labels: 
-        stem/dedicated: app
+        mng/dedicated: app
       NodeRole: !GetAtt EksNodeIamRole.Arn
       ScalingConfig: 
         DesiredSize: 2
@@ -454,49 +493,6 @@ Resources:
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB
         - !Ref PrivateSubnetC
-      LaunchTemplate:
-        Id: !Ref AppLaunchTemplate
-  AppLaunchTemplate:
-    Type: AWS::EC2::LaunchTemplate
-    Properties:
-      LaunchTemplateName: app-nodegroup-launchtemplate
-      LaunchTemplateData: 
-        KeyName: !Ref KeyPair
-        SecurityGroupIds: 
-          - !Ref EksNodeSecurityGroup
-        TagSpecifications: 
-          - ResourceType: instance
-            Tags: 
-              - Key: Name
-                Value: app-nodegroup-instance
-  EksClusterSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group for EKS Cluster SSH Connection"
-      GroupName: eks-cluster-sg
-      SecurityGroupIngress: 
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: eks-cluster-sg
-  EksNodeSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group for EKS Cluster Node SSH Connection"
-      GroupName: eks-node-sg
-      SecurityGroupIngress: 
-        # - SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
-        #   FromPort: 22
-        #   IpProtocol: tcp
-        #   ToPort: 22
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: eks-node-sg
   EksClusterIamRole:
     Type: AWS::IAM::Role
     Properties:
