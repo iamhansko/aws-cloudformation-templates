@@ -320,10 +320,12 @@ Resources:
             chmod 700 /home/ec2-user/get_helm.sh
             /home/ec2-user/get_helm.sh
 
+            kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
             git clone https://codeberg.org/hjacobs/kube-ops-view.git
             cd kube-ops-view/
             kubectl apply -k deploy
-            kubectl patch svc kube-ops-view -p '{"metadata": {"annotations": {"service.beta.kubernetes.io/aws-load-balancer-nlb-target-type": "ip", "service.beta.kubernetes.io/aws-load-balancer-scheme":"internal", "service.beta.kubernetes.io/aws-load-balancer-security-groups":"${NlbServiceSecurityGroup}"}}, "spec": {"type": "LoadBalancer", "loadBalancerClass": "eks.amazonaws.com/nlb"}}'
+            kubectl patch svc kube-ops-view -p '{"metadata": {"annotations": {"service.beta.kubernetes.io/aws-load-balancer-nlb-target-type": "ip", "service.beta.kubernetes.io/aws-load-balancer-scheme":"internal", "service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules":"true", "service.beta.kubernetes.io/aws-load-balancer-security-groups":"${NlbServiceSecurityGroup}"}}, "spec": {"type": "LoadBalancer", "loadBalancerClass": "eks.amazonaws.com/nlb"}}'
 
             EOF
 
