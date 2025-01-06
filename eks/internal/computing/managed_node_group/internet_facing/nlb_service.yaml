@@ -303,6 +303,8 @@ Resources:
             systemctl enable code-server
             systemctl start code-server
 
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+
             sudo -Eu ec2-user bash << 'EOF'
             cd /home/ec2-user
             mkdir -p /home/ec2-user/bin
@@ -349,11 +351,9 @@ Resources:
             git clone https://codeberg.org/hjacobs/kube-ops-view.git
             cd kube-ops-view/
             kubectl apply -k deploy
-            kubectl patch svc kube-ops-view -p '{"metadata": {"annotations": {"service.beta.kubernetes.io/aws-load-balancer-nlb-target-type": "ip", "service.beta.kubernetes.io/aws-load-balancer-scheme":"internet-facing", "service.beta.kubernetes.io/aws-load-balancer-security-groups":"${NlbServiceSecurityGroup}"}}, "spec": {"type": "LoadBalancer", "loadBalancerClass": "service.k8s.aws/nlb"}}'
+            kubectl patch svc kube-ops-view -p '{"metadata": {"annotations": {"service.beta.kubernetes.io/aws-load-balancer-nlb-target-type": "ip", "service.beta.kubernetes.io/aws-load-balancer-scheme":"internet-facing", "service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules":"true", "service.beta.kubernetes.io/aws-load-balancer-security-groups":"${NlbServiceSecurityGroup}"}}, "spec": {"type": "LoadBalancer", "loadBalancerClass": "service.k8s.aws/nlb"}}'
             
             EOF
-
-            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
   BastionEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -375,8 +375,17 @@ Resources:
                 - ec2.amazonaws.com
             Action:
               - 'sts:AssumeRole'
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/PowerUserAccess
+      Policies:
+        - PolicyName: BastionEc2IamPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - eks:*
+                  - cloudformation:*
+                  - iam:*
+                Resource: '*'
   BastionEc2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
