@@ -266,64 +266,6 @@ Resources:
             usermod -aG docker ec2-user
             newgrp docker
 
-            mkdir -p /home/ec2-user/match
-
-            echo 'package main
-            import (
-              "encoding/json"
-              "fmt"
-              "log"
-              "net/http"
-              "strings"
-            )
-            type Response struct {
-                STATUS   string `json:"status"`
-            }
-            func main() {
-              http.HandleFunc("/v1/match", func(w http.ResponseWriter, r *http.Request) {
-                token := r.URL.Query().Get("token")
-                response := Response{}
-                response.STATUS = "FAIL"
-                w.Header().Add("content-type", "application/json")
-
-                if len(token) <= 8 && strings.Count(token, string(token[0])) == len(token) {
-                  response.STATUS = "OK"
-                }
-
-                data, _ := json.Marshal(response)
-                w.WriteHeader(http.StatusOK)
-                fmt.Fprint(w, string(data))
-              })
-
-              http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-                response := Response{}
-                response.STATUS = "OK"
-                w.Header().Add("content-type", "application/json")
-                data, _ := json.Marshal(response)
-                w.WriteHeader(http.StatusOK)
-                fmt.Fprint(w, string(data))
-              })
-                log.Println("Start server")
-              http.ListenAndServe(":8080", nil)
-            }' > /home/ec2-user/match/match.go
-            echo 'FROM golang:1.16 AS build
-            WORKDIR /source
-            COPY match.go ./
-            RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o match match.go
-            FROM alpine
-            WORKDIR /app
-            RUN apk --no-cache add ca-certificates && apk --no-cache upgrade
-            COPY --from=build /source/match ./
-            RUN chmod +x ./match
-            RUN adduser -D appuser
-            RUN chown appuser:appuser ./match
-            USER appuser
-            ENTRYPOINT ["./match"]' > /home/ec2-user/match/Dockerfile
-            aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
-            MATCH_IMAGE_TAG=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Ecr}:latest
-            docker build -t $MATCH_IMAGE_TAG /home/ec2-user/match
-            docker push $MATCH_IMAGE_TAG
-
             sudo -Eu ec2-user bash << 'EOF'
             cd /home/ec2-user
             mkdir -p /home/ec2-user/bin
