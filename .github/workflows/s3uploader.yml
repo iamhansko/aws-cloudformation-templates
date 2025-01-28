@@ -16,4 +16,4 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
       - name: Upload to S3 Bucket
-        run: aws s3 sync . s3://iamhanskogithub --delete --exclude "README.md" --exclude ".*"
+        run: aws s3 sync . ${{ secrets.S3_BUCKET }} --delete --exclude "README.md" --exclude ".*"
