@@ -1,0 +1,313 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation Template"
+
+Mappings:
+  # https://aws.amazon.com/ko/blogs/korea/limit-access-to-your-origins-using-the-aws-managed-prefix-list-for-amazon-cloudfront
+  # aws ec2 describe-managed-prefix-lists  --region <REGION> | jq -r '.PrefixLists[] | select (.PrefixListName == "com.amazonaws.global.cloudfront.origin-facing") | .PrefixListId'
+  AWSRegions2PrefixListID:
+    ap-northeast-1:
+      PrefixList: pl-58a04531
+    ap-northeast-2:
+      PrefixList: pl-22a6434b
+    ap-northeast-3:
+     PrefixList: pl-31a14458
+    ap-south-1:
+      PrefixList: pl-9aa247f3
+    ap-southeast-1:
+      PrefixList: pl-31a34658
+    ap-southeast-2:
+      PrefixList: pl-b8a742d1
+    ca-central-1:
+      PrefixList: pl-38a64351
+    eu-central-1:
+      PrefixList: pl-a3a144ca
+    eu-north-1:
+      PrefixList: pl-fab65393
+    eu-west-1:
+      PrefixList: pl-4fa04526
+    eu-west-2:
+      PrefixList: pl-93a247fa
+    eu-west-3:
+      PrefixList: pl-75b1541c
+    sa-east-1:
+      PrefixList: pl-5da64334
+    us-east-1:
+      PrefixList: pl-3b927c52
+    us-east-2:
+      PrefixList: pl-b6a144df
+    us-west-1:
+      PrefixList: pl-4ea04527
+    us-west-2:
+      PrefixList: pl-82a045eb
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: VPC Network
+        Parameters:
+          - VpcId
+          - PublicSubnetId
+      - Label:
+          default: VS Code on EC2 Instance
+        Parameters:
+          - AmiId
+          - InstanceType
+          - SecurityGroupIds
+
+Parameters:
+  VpcId:
+    Description: Existing VPC ID
+    Type: AWS::EC2::VPC::Id
+    AllowedPattern: ".+"
+    ConstraintDescription: "Parameter [VpcId] must not be empty"
+  PublicSubnetId:
+    Description: Existing Public Subnet ID
+    Type: AWS::EC2::Subnet::Id
+    AllowedPattern: ".+"
+    ConstraintDescription: "Parameter [PublicSubnetId] is invalid"
+  AmiId:
+    Description: EC2 AMI Id
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+    AllowedValues:
+      # aws ssm get-parameters-by-path --path /aws/service/ami-amazon-linux-latest --query 'Parameters[].Name'
+      - "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64"
+      - "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+      - "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-6.1-arm64"
+      - "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-6.1-x86_64"
+      - "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64"
+      - "/aws/service/ami-amazon-linux-latest/amzn-ami-hvm-x86_64-gp2"
+      - "/aws/service/ami-amazon-linux-latest/amzn-ami-hvm-x86_64-s3"
+      - "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-ebs"
+      - "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+      - "/aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-x86_64-ebs"
+      - "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+      - "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+      - "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64"
+      - "/aws/service/ami-amazon-linux-latest/amzn-ami-hvm-x86_64-ebs"
+      - "/aws/service/ami-amazon-linux-latest/amzn-ami-minimal-hvm-x86_64-ebs"
+      - "/aws/service/ami-amazon-linux-latest/amzn-ami-minimal-hvm-x86_64-s3"
+      - "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-arm64-gp2"
+      - "/aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-arm64-gp2"
+      - "/aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-x86_64-gp2"
+      - "/aws/service/ami-amazon-linux-latest/amzn2-ami-minimal-hvm-arm64-ebs"
+      - "/aws/service/ami-amazon-linux-latest/amzn2-ami-minimal-hvm-x86_64-ebs"
+    AllowedPattern: ".+"
+    ConstraintDescription: "Parameter [AmiId] must not be empty"
+  InstanceType:
+    Description: EC2 Instance Type
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t1.micro
+      - t2.2xlarge
+      - t2.large
+      - t2.medium
+      - t2.micro
+      - t2.nano
+      - t2.small
+      - t2.xlarge
+      - t3.2xlarge
+      - t3.large
+      - t3.medium
+      - t3.micro
+      - t3.nano
+      - t3.small
+      - t3.xlarge
+      - t3a.2xlarge
+      - t3a.large
+      - t3a.medium
+      - t3a.micro
+      - t3a.nano
+      - t3a.small
+      - t3a.xlarge
+      - t4g.2xlarge
+      - t4g.large
+      - t4g.medium
+      - t4g.micro
+      - t4g.nano
+      - t4g.small
+      - t4g.xlarge
+    AllowedPattern: ".+"
+    ConstraintDescription: "Parameter [InstanceType] must not be empty"
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  OpsEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT10M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnetId
+          GroupSet: 
+            - !Ref OpsEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref OpsEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash
+            dnf update -y
+            dnf install -y -q git
+            dnf groupinstall -y -q "Development Tools"
+            dnf install -y -q python3.12
+            python3.12 -m ensurepip --upgrade
+            python3.12 -m pip install --upgrade pip
+            ln -s /usr/bin/pip3.12 /usr/local/bin/pip
+            ln -s /usr/bin/python3.12 /usr/bin/python
+            wget -q https://github.com/coder/code-server/releases/download/v4.93.1/code-server-4.93.1-linux-amd64.tar.gz
+            tar -xzf code-server-4.93.1-linux-amd64.tar.gz
+            mv code-server-4.93.1-linux-amd64 /usr/local/lib/code-server
+            ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+            mkdir -p /home/ec2-user/.config/code-server
+            cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+            bind-addr: 0.0.0.0:8000
+            auth: none
+            cert: false
+            EOF
+            chown -R ec2-user:ec2-user /home/ec2-user/.config
+            cat <<EOF > /etc/systemd/system/code-server.service
+            [Unit]
+            Description=VS Code Server
+            After=network.target
+            [Service]
+            Type=simple
+            User=ec2-user
+            ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+            Restart=always
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl daemon-reload
+            systemctl enable --now code-server
+
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource OpsEc2 --region ${AWS::Region}
+
+            dnf install -y -q docker
+            systemctl enable --now docker
+            # usermod -aG docker ec2-user
+            # newgrp docker
+            ## VS Code Server Terminal(Bash) Deletes "docker" group... 
+            chmod 666 /var/run/docker.sock
+  OpsEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Ops EC2 SSH Connection"
+      GroupName: ops-ec2-sg
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: com.amazonaws.global.cloudfront.origin-facing
+          IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourcePrefixListId: !FindInMap [AWSRegions2PrefixListID, !Ref AWS::Region, PrefixList]
+      Tags:
+        - Key: Name
+          Value: ops-ec2-sg
+  OpsEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  OpsEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref OpsEc2IamRole
+  # https://docs.aws.amazon.com/ko_kr/AmazonCloudFront/latest/DeveloperGuide/distribution-working-with.websockets.html
+  # https://github.com/aws-samples/code-server-setup-with-cloudformation/blob/main/code-server-stack.yaml
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt OpsEc2.PublicDnsName
+            Id: !GetAtt OpsEc2.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 8000
+              OriginProtocolPolicy: http-only
+        Enabled: true
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT 
+            - POST 
+            - PATCH 
+            - DELETE
+          ForwardedValues:
+            QueryString: 'false'
+          Compress: false
+          TargetOriginId: !GetAtt OpsEc2.PublicDnsName
+          ViewerProtocolPolicy: allow-all
+          CachePolicyId: !Ref CloudFrontCachePolicy 
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # AllViewer
+  CloudFrontCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 1
+        Name: !Join ['-', ['VSCode', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: all
+          EnableAcceptEncodingGzip: False
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers: 
+              - Accept-Charset
+              - Authorization
+              - Origin
+              - Accept
+              - Referer
+              - Host
+              - Accept-Language
+              - Accept-Encoding
+              - Accept-Datetime
+          QueryStringsConfig:
+            QueryStringBehavior: all
+
+Outputs:
+  CloudFrontDomainName:
+    Value: !Sub
+      - "https://${domain}"
+      - domain: !GetAtt CloudFrontDistribution.DomainName
+  Ec2InstanceId:
+    Value: !Ref OpsEc2
+  Ec2IamRoleArn:
+    Value: !GetAtt OpsEc2IamRole.Arn 
+  Ec2PublicIp:
+    Value: !GetAtt OpsEc2.PublicIp
+  Ec2PublicDnsName:
+    Value: !GetAtt OpsEc2.PublicDnsName
+  Ec2SecurityGroup:
+    Value: !Ref OpsEc2SecurityGroup
