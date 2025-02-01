@@ -53,7 +53,6 @@ Metadata:
         Parameters:
           - AmiId
           - InstanceType
-          - SecurityGroupIds
 
 Parameters:
   VpcId:
@@ -136,9 +135,7 @@ Resources:
   KeyPair:
     Type: AWS::EC2::KeyPair
     Properties:
-      KeyName: !Sub
-        - "key-${Id}"
-        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+      KeyName: !Join ['-', ['key', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
   OpsEc2:
     Type: AWS::EC2::Instance
     CreationPolicy:
@@ -210,7 +207,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: "Security Group for Ops EC2 SSH Connection"
-      GroupName: ops-ec2-sg
+      GroupName: !Join ['-', ['ops-ec2-sg', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - Description: com.amazonaws.global.cloudfront.origin-facing
@@ -218,9 +215,6 @@ Resources:
           FromPort: 8000
           ToPort: 8000
           SourcePrefixListId: !FindInMap [AWSRegions2PrefixListID, !Ref AWS::Region, PrefixList]
-      Tags:
-        - Key: Name
-          Value: ops-ec2-sg
   OpsEc2IamRole:
     Type: AWS::IAM::Role
     Properties:
