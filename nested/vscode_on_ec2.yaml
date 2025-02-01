@@ -40,31 +40,31 @@ Mappings:
     us-west-2:
       PrefixList: pl-82a045eb
 
-Metadata:
-  AWS::CloudFormation::Interface:
-    ParameterGroups:
-      - Label:
-          default: VPC Network
-        Parameters:
-          - VpcId
-          - PublicSubnetId
-      - Label:
-          default: VS Code on EC2 Instance
-        Parameters:
-          - AmiId
-          - InstanceType
+# Metadata:
+#   AWS::CloudFormation::Interface:
+#     ParameterGroups:
+#       - Label:
+#           default: VPC Network
+#         Parameters:
+#           - VpcId
+#           - PublicSubnetId
+#       - Label:
+#           default: VS Code on EC2 Instance
+#         Parameters:
+#           - AmiId
+#           - InstanceType
 
 Parameters:
-  VpcId:
-    Description: Existing VPC ID
-    Type: AWS::EC2::VPC::Id
-    AllowedPattern: ".+"
-    ConstraintDescription: "Parameter [VpcId] must not be empty"
-  PublicSubnetId:
-    Description: Existing Public Subnet ID
-    Type: AWS::EC2::Subnet::Id
-    AllowedPattern: ".+"
-    ConstraintDescription: "Parameter [PublicSubnetId] is invalid"
+  # VpcId:
+  #   Description: Existing VPC ID
+  #   Type: AWS::EC2::VPC::Id
+  #   AllowedPattern: ".+"
+  #   ConstraintDescription: "Parameter [VpcId] must not be empty"
+  # PublicSubnetId:
+  #   Description: Existing Public Subnet ID
+  #   Type: AWS::EC2::Subnet::Id
+  #   AllowedPattern: ".+"
+  #   ConstraintDescription: "Parameter [PublicSubnetId] is invalid"
   AmiId:
     Description: EC2 AMI Id
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
@@ -132,6 +132,52 @@ Parameters:
     ConstraintDescription: "Parameter [InstanceType] must not be empty"
 
 Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags: 
+        - Key : Name
+          Value : ops-vpc
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: !Select [0, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      Tags: 
+        - Key : Name
+          Value : ops-public-subnet-a
+      VpcId: !Ref Vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: ops-igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : ops-public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+
   KeyPair:
     Type: AWS::EC2::KeyPair
     Properties:
@@ -149,7 +195,7 @@ Resources:
       NetworkInterfaces: 
         - AssociatePublicIpAddress: True
           DeviceIndex: 0
-          SubnetId: !Ref PublicSubnetId
+          SubnetId: !Ref PublicSubnet
           GroupSet: 
             - !Ref OpsEc2SecurityGroup
       Tags: 
@@ -208,7 +254,7 @@ Resources:
     Properties:
       GroupDescription: "Security Group for Ops EC2 SSH Connection"
       GroupName: !Join ['-', ['ops-ec2-sg', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - Description: com.amazonaws.global.cloudfront.origin-facing
           IpProtocol: tcp
