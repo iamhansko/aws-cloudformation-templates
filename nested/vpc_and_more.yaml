@@ -1,13 +1,29 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: CloudFormation Template
-Transform: AWS::LanguageExtensions
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: VPC
+        Parameters:
+          - Prefix
+          - VpcCidrBlock
+          - EnableDnsHostnamesOption
+          - EnableDnsResolutionOption
+      - Label:
+          default: Subnets
+        Parameters:
+          - NumberOfPublicSubnets
+          - NumberOfPrivateSubnets
 
 Parameters:
   Prefix:
     Description: Name Tag Auto-generation ("project" -> project-vpc, project-igw, ...)
     Type: String
     Default: project
-    ConstraintDescription: "Parameter [Prefix] is invalid"
+    AllowedPattern: ".+"
+    ConstraintDescription: "Parameter [Prefix] must not be empty" 
   VpcCidrBlock:
     Description: CIDR Block for the VPC to Create (ex 10.0.0.0/16)
     Type: String
@@ -19,28 +35,26 @@ Parameters:
     Default: 2
     MinValue: 0
     MaxValue: 3
-    ConstraintDescription: "Parameter [NumberOfPublicSubnets] is invalid"
+    ConstraintDescription: "Parameter [NumberOfPublicSubnets] must not be empty"
   NumberOfPrivateSubnets:
     Description: NumberOfPublicSubnets >= NumberOfPrivateSubnets
     Type: Number
     Default: 2
     MinValue: 0
     MaxValue: 3
-    ConstraintDescription: "Parameter [NumberOfPrivateSubnets] is invalid"
+    ConstraintDescription: "Parameter [NumberOfPrivateSubnets] must not be empty"
   EnableDnsHostnamesOption:
     Type: String
     Default: true
     AllowedValues:
       - true
       - false
-    ConstraintDescription: "Parameter [EnableDnsHostnamesOption] is invalid"
   EnableDnsResolutionOption:
     Type: String
     Default: true
     AllowedValues:
       - true
       - false
-    ConstraintDescription: "Parameter [EnableDnsResolutionOption] is invalid"
 
 Conditions:
   CreatePublicSubnet1: !Not [!Equals [!Ref NumberOfPublicSubnets, 0]] # 1, 2, 3

@@ -53,8 +53,6 @@ Metadata:
         Parameters:
           - AmiId
           - InstanceType
-          - SsmRunCommandShellScript
-          - SsmCommandWaitForSuccessTimeoutSeconds
 
 Parameters:
   VpcId:
@@ -66,7 +64,7 @@ Parameters:
     Description: Existing Public Subnet ID
     Type: AWS::EC2::Subnet::Id
     AllowedPattern: .+
-    ConstraintDescription: Parameter [PublicSubnetId] must not be empty
+    ConstraintDescription: Parameter [PublicSubnetId] is invalid
   AmiId:
     Description: EC2 AMI Id
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
@@ -94,6 +92,8 @@ Parameters:
       - /aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-x86_64-gp2
       - /aws/service/ami-amazon-linux-latest/amzn2-ami-minimal-hvm-arm64-ebs
       - /aws/service/ami-amazon-linux-latest/amzn2-ami-minimal-hvm-x86_64-ebs
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [AmiId] must not be empty
   InstanceType:
     Description: EC2 Instance Type
     Type: String
@@ -128,20 +128,8 @@ Parameters:
       - t4g.nano
       - t4g.small
       - t4g.xlarge
-  SsmRunCommandShellScript:
-    Description: Systems Manager Run Command [AWS-RunShellScript]
-    Type: String
-    Default: ""
-  SsmCommandWaitForSuccessTimeoutSeconds:
-    Description: If the association status doesn't show [Success] after the specified number of seconds, then stack creation fails. 
-    Type: Number
-    Default: 300
-    MinValue: 15
-    MaxValue: 172800
-    ConstraintDescription: Parameter [SsmCommandWaitForSuccessTimeoutSeconds] is invalid (15 <= Value <= 172800)
-
-Conditions:
-  CreateSsmAssociate: !Not [!Equals [!Ref SsmRunCommandShellScript, ""]]
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [InstanceType] must not be empty
 
 Resources:
   KeyPair:
@@ -150,7 +138,15 @@ Resources:
       KeyName: !Join
         - '-'
         - - key
-          - !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+          - !Select
+            - 4
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - /
+                  - !Ref AWS::StackId
   OpsEc2:
     Type: AWS::EC2::Instance
     CreationPolicy:
@@ -223,7 +219,15 @@ Resources:
       GroupName: !Join
         - '-'
         - - ops-ec2-sg
-          - !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+          - !Select
+            - 4
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - /
+                  - !Ref AWS::StackId
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - Description: com.amazonaws.global.cloudfront.origin-facing
@@ -319,29 +323,6 @@ Resources:
               - Accept-Datetime
           QueryStringsConfig:
             QueryStringBehavior: all
-
-  # SsmRunCommandS3Bucket:
-  #   Type: AWS::S3::Bucket
-  #   Condition: CreateSsmAssociate
-  
-  SsmAssociation:
-    Type: AWS::SSM::Association
-    Condition: CreateSsmAssociate
-    Properties:
-      Name: AWS-RunShellScript
-      WaitForSuccessTimeoutSeconds: !Ref SsmCommandWaitForSuccessTimeoutSeconds
-      Targets:
-        - Key: InstanceIds
-          Values:
-            - !Ref OpsEc2
-      Parameters:
-        commands: 
-          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
-          - !Ref SsmRunCommandShellScript
-      # OutputLocation:
-      #   S3Location: 
-      #     OutputS3BucketName: !Ref SsmRunCommandS3Bucket
-      #     OutputS3KeyPrefix: 'logs/'
 
 Outputs:
   CloudFrontDomainName:
