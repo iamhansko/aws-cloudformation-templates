@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation Template"
+
+Resources:
+  EksClusterStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: "https://iamhanskogithub.s3.ap-southeast-2.amazonaws.com/nested/eksctl_on_ec2/deprecated_cluster.yaml"
+  
+  LbcSsmRunCommandS3Bucket:
+    Type: AWS::S3::Bucket
+  
+  LbcSsmAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-RunShellScript
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !GetAtt EksClusterStack.Outputs.Ec2InstanceId
+      OutputLocation:
+        S3Location: 
+          OutputS3BucketName: !Ref LbcSsmRunCommandS3Bucket
+          OutputS3KeyPrefix: 'logs/'
+      Parameters:
+        commands: 
+          - !Sub 
+            - |
+              su - ec2-user <<'EOF'
+              aws_region=${AWS::Region}
+              cluster_name=${EksClusterName}
+              vpc_id=${VpcId}
+              account_id=$(aws sts get-caller-identity --query "Account" --output text)
+              
+              oidc_id=$(aws eks describe-cluster --name $cluster_name --query "cluster.identity.oidc.issuer" --output text | cut -d '/' -f 5)
+              echo $oidc_id
+              eksctl utils associate-iam-oidc-provider --cluster $cluster_name --approve
+              aws iam list-open-id-connect-providers | grep $oidc_id | cut -d "/" -f4
+
+              curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
+              aws iam create-policy \
+              --policy-name AWSLoadBalancerControllerIAMPolicy \
+              --policy-document file://iam_policy.json
+              rm iam_policy.json
+
+              eksctl create iamserviceaccount \
+              --cluster=$cluster_name \
+              --namespace=kube-system \
+              --name=aws-load-balancer-controller \
+              --role-name AmazonEKSLoadBalancerControllerRole \
+              --attach-policy-arn="arn:aws:iam::$account_id:policy/AWSLoadBalancerControllerIAMPolicy" \
+              --approve --region $aws_region
+              helm repo add eks https://aws.github.io/eks-charts
+              helm repo update eks
+              helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
+              --set clusterName=$cluster_name \
+              --set serviceAccount.create=false \
+              --set serviceAccount.name=aws-load-balancer-controller \
+              --set region=$aws_region \
+              --set vpcId=$vpc_id
+              kubectl rollout status -n kube-system deploy aws-load-balancer-controller
+
+              git clone https://codeberg.org/hjacobs/kube-ops-view.git
+              cd kube-ops-view/
+              kubectl apply -k deploy
+              kubectl patch svc kube-ops-view -p "{\"spec\": {\"type\": \"LoadBalancer\"}}"
+              EOF
+            - EksClusterName: !GetAtt EksClusterStack.Outputs.EksClusterName
+              VpcId: !GetAtt EksClusterStack.Outputs.VpcId
+
+Outputs:
+  CloudFrontDomainName: 
+    Value: !GetAtt EksClusterStack.Outputs.CloudFrontDomainName
+  EksClusterName:
+    Value: !GetAtt EksClusterStack.Outputs.EksClusterName
+  Ec2InstanceId:
+    Value: !GetAtt EksClusterStack.Outputs.Ec2InstanceId
+  Ec2IamRoleArn:
+    Value: !GetAtt EksClusterStack.Outputs.Ec2IamRoleArn
+  Ec2PublicIp:
+    Value: !GetAtt EksClusterStack.Outputs.Ec2PublicIp
+  Ec2PublicDnsName:
+    Value: !GetAtt EksClusterStack.Outputs.Ec2PublicDnsName
+  Ec2SecurityGroup:
+    Value: !GetAtt EksClusterStack.Outputs.Ec2SecurityGroup
+  VpcId: 
+    Value: !GetAtt EksClusterStack.Outputs.VpcId
+  PublicSubnet1Id:
+    Value: !GetAtt EksClusterStack.Outputs.PublicSubnet1Id
+  PublicSubnet2Id:
+    Value: !GetAtt EksClusterStack.Outputs.PublicSubnet2Id
+  PublicSubnet3Id:
+    Value: !GetAtt EksClusterStack.Outputs.PublicSubnet3Id
+  PrivateSubnet1Id:
+    Value: !GetAtt EksClusterStack.Outputs.PrivateSubnet1Id
+  PrivateSubnet2Id:
+    Value: !GetAtt EksClusterStack.Outputs.PrivateSubnet2Id
+  PrivateSubnet3Id:
+    Value: !GetAtt EksClusterStack.Outputs.PrivateSubnet3Id
