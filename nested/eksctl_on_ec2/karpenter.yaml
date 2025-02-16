@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation Template"
+
+Resources:
+  EksClusterStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: "https://iamhanskogithub.s3.ap-southeast-2.amazonaws.com/nested/eksctl_on_ec2/cluster.yaml"
+  
+  KarpenterSsmAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 1800
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !GetAtt EksClusterStack.Outputs.Ec2InstanceId
+      Parameters:
+        commands: 
+          # https://catalog.workshops.aws/karpenter/en-US/install-karpenter
+          # KARPENTER_IAM_ROLE_ARN ???
+          # settings.interruptionQueue=$CLUSTER_NAME ???
+          - !Sub 
+            - |
+              su - ec2-user <<'EOF'
+              export HOME="/home/ec2-user"
+              export CLUSTER_NAME=${EksClusterName}
+              export AWS_REGION=${AWS::Region}
+              export AWS_ACCOUNT_ID=${AWS::AccountId}
+              export CLUSTER_ENDPOINT="$(aws eks describe-cluster --name $CLUSTER_NAME --query "cluster.endpoint" --output text)"
+              export KARPENTER_NAMESPACE="kube-system"
+              echo Cluster Name:$CLUSTER_NAME AWS Region:$AWS_REGION Account ID:$AWS_ACCOUNT_ID Cluster Endpoint:$CLUSTER_ENDPOINT Karpenter Namespace:$KARPENTER_NAMESPACE
+              
+              KARPENTER_VERSION_V=$(curl -sL "https://api.github.com/repos/aws/karpenter/releases/latest" | jq -r ".tag_name")
+              export KARPENTER_VERSION=$(echo $KARPENTER_VERSION_V | sed "s/^v//")
+              echo "Karpenter's Latest release version: $KARPENTER_VERSION"
+
+              export TEMPOUT=$(mktemp)
+              curl -fsSL https://raw.githubusercontent.com/aws/karpenter-provider-aws/v"$KARPENTER_VERSION"/website/content/en/preview/getting-started/getting-started-with-karpenter/cloudformation.yaml  > "$TEMPOUT" \
+              && aws cloudformation deploy \
+                --stack-name "Karpenter-$CLUSTER_NAME" \
+                --template-file "$TEMPOUT" \
+                --capabilities CAPABILITY_NAMED_IAM \
+                --parameter-overrides "ClusterName=$CLUSTER_NAME"
+
+              eksctl utils associate-iam-oidc-provider --cluster $CLUSTER_NAME --approve
+
+              eksctl create iamserviceaccount \
+                --cluster "$CLUSTER_NAME" --name karpenter --namespace $KARPENTER_NAMESPACE \
+                --role-name "$CLUSTER_NAME-karpenter" \
+                --attach-policy-arn "arn:aws:iam::$AWS_ACCOUNT_ID:policy/KarpenterControllerPolicy-$CLUSTER_NAME" \
+                --role-only \
+                --approve
+              export KARPENTER_IAM_ROLE_ARN="arn:aws:iam::$AWS_ACCOUNT_ID:role/$CLUSTER_NAME-karpenter"
+
+              aws iam create-service-linked-role --aws-service-name spot.amazonaws.com || true
+
+              helm registry logout public.ecr.aws
+              helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version "$KARPENTER_VERSION" \
+                --namespace "$KARPENTER_NAMESPACE" --create-namespace \
+                --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=$KARPENTER_IAM_ROLE_ARN \
+                --set settings.clusterName=$CLUSTER_NAME \
+                --set settings.clusterEndpoint=$CLUSTER_ENDPOINT \
+                --set settings.featureGates.spotToSpotConsolidation=true \
+                --set settings.interruptionQueue=$CLUSTER_NAME \
+                --set controller.resources.requests.cpu=1 \
+                --set controller.resources.requests.memory=1Gi \
+                --set controller.resources.limits.cpu=1 \
+                --set controller.resources.limits.memory=1Gi \
+                --wait
+
+              wget -O eks-node-viewer https://github.com/awslabs/eks-node-viewer/releases/download/v0.7.1/eks-node-viewer_Linux_x86_64
+              chmod +x eks-node-viewer
+              sudo mv -v eks-node-viewer /usr/local/bin
+              
+              curl -sS https://webinstall.dev/k9s | bash\" | tee -a  /home/ec2-user/.bash_profile
+              EOF
+            - EksClusterName: !GetAtt EksClusterStack.Outputs.EksClusterName
+
+Outputs:
+  CloudFrontDomainName: 
+    Value: !GetAtt EksClusterStack.Outputs.CloudFrontDomainName
+  EksClusterName:
+    Value: !GetAtt EksClusterStack.Outputs.EksClusterName
+  Ec2InstanceId:
+    Value: !GetAtt EksClusterStack.Outputs.Ec2InstanceId
+  Ec2IamRoleArn:
+    Value: !GetAtt EksClusterStack.Outputs.Ec2IamRoleArn
+  Ec2PublicIp:
+    Value: !GetAtt EksClusterStack.Outputs.Ec2PublicIp
+  Ec2PublicDnsName:
+    Value: !GetAtt EksClusterStack.Outputs.Ec2PublicDnsName
+  Ec2SecurityGroup:
+    Value: !GetAtt EksClusterStack.Outputs.Ec2SecurityGroup
+  VpcId: 
+    Value: !GetAtt EksClusterStack.Outputs.VpcId
+  PublicSubnet1Id:
+    Value: !GetAtt EksClusterStack.Outputs.PublicSubnet1Id
+  PublicSubnet2Id:
+    Value: !GetAtt EksClusterStack.Outputs.PublicSubnet2Id
+  PublicSubnet3Id:
+    Value: !GetAtt EksClusterStack.Outputs.PublicSubnet3Id
+  PrivateSubnet1Id:
+    Value: !GetAtt EksClusterStack.Outputs.PrivateSubnet1Id
+  PrivateSubnet2Id:
+    Value: !GetAtt EksClusterStack.Outputs.PrivateSubnet2Id
+  PrivateSubnet3Id:
+    Value: !GetAtt EksClusterStack.Outputs.PrivateSubnet3Id
