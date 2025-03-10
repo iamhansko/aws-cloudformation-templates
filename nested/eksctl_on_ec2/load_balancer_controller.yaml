@@ -21,6 +21,12 @@ Resources:
           - !Sub 
             - |
               su - ec2-user << EOF
+
+              export oidc_id=$(aws eks describe-cluster --name ${EksClusterName} --query "cluster.identity.oidc.issuer" --output text | cut -d '/' -f 5)
+              echo $oidc_id
+              eksctl utils associate-iam-oidc-provider --region ${AWS::Region} --cluster ${EksClusterName} --approve
+              aws iam list-open-id-connect-providers | grep $oidc_id | cut -d "/" -f4
+
               curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
               aws iam create-policy \
               --policy-name AWSLoadBalancerControllerIAMPolicy-${RandomNumber} \

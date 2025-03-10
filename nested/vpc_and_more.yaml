@@ -175,12 +175,6 @@ Resources:
         - Key: kubernetes.io/role/internal-elb
           Value: 1
       VpcId: !Ref Vpc
-  PrivateSubnet1RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Condition: CreatePrivateSubnet1
-    Properties:
-      RouteTableId: !Ref PrivateSubnet1RouteTable
-      SubnetId: !Ref PrivateSubnet1
   NatGateway1ElasticIp:
     Type: AWS::EC2::EIP
     Condition: CreatePrivateSubnet1
@@ -228,12 +222,6 @@ Resources:
         - Key: kubernetes.io/role/internal-elb
           Value: 1
       VpcId: !Ref Vpc
-  PrivateSubnet2RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Condition: CreatePrivateSubnet2
-    Properties:
-      RouteTableId: !Ref PrivateSubnet2RouteTable
-      SubnetId: !Ref PrivateSubnet2
   NatGateway2ElasticIp:
     Type: AWS::EC2::EIP
     Condition: CreatePrivateSubnet2
@@ -281,12 +269,6 @@ Resources:
         - Key: kubernetes.io/role/internal-elb
           Value: 1
       VpcId: !Ref Vpc
-  PrivateSubnet3RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Condition: CreatePrivateSubnet3
-    Properties:
-      RouteTableId: !Ref PrivateSubnet3RouteTable
-      SubnetId: !Ref PrivateSubnet3
   NatGateway3ElasticIp:
     Type: AWS::EC2::EIP
     Condition: CreatePrivateSubnet3

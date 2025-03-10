@@ -200,11 +200,7 @@ Resources:
                     - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy' > /home/ec2-user/eksctl/cluster.yaml
             
             eksctl create cluster -f /home/ec2-user/eksctl/cluster.yaml
-            
-            export oidc_id=$(aws eks describe-cluster --name ${EksClusterName} --query "cluster.identity.oidc.issuer" --output text | cut -d '/' -f 5)
-            echo $oidc_id
-            eksctl utils associate-iam-oidc-provider --region ${AWS::Region} --cluster ${EksClusterName} --approve
-            aws iam list-open-id-connect-providers | grep $oidc_id | cut -d "/" -f4
+
             EOF
           - Vpc: !GetAtt NetworkStack.Outputs.VpcId
             PublicSubnet1: !GetAtt NetworkStack.Outputs.PublicSubnet1Id
