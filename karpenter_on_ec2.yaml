@@ -417,8 +417,6 @@ Resources:
         Fn::Sub: |
           #!/bin/bash
 
-          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeOnEc2 --region ${AWS::Region}
-
           dnf update -y
           dnf install -y -q git
           dnf groupinstall -y -q "Development Tools"
@@ -427,6 +425,8 @@ Resources:
           python3.12 -m pip install --upgrade pip
           ln -sf /usr/bin/python3.12 /usr/bin/python
           echo "alias pip=pip3" >> ~/.bashrc
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeOnEc2 --region ${AWS::Region}
 
           export CODE_SERVER_VERSION="4.96.4"
           wget -q https://github.com/coder/code-server/releases/download/v$CODE_SERVER_VERSION/code-server-$CODE_SERVER_VERSION-linux-amd64.tar.gz
@@ -569,7 +569,7 @@ Resources:
     Type: AWS::SSM::Association
     Properties:
       Name: AWS-RunShellScript
-      WaitForSuccessTimeoutSeconds: 900
+      WaitForSuccessTimeoutSeconds: 1800
       Targets:
         - Key: InstanceIds
           Values:
@@ -599,12 +599,12 @@ Resources:
 
               mkdir -p /home/ec2-user/eksctl
 
-              # echo '#!/bin/bash
-              # cluster_name="${EksClusterName}"
-              # bastion_id=\$(ec2-metadata -i | cut -d " " -f 2)
-              # cluster_sg=\$(aws eks describe-cluster --name \$cluster_name --query "cluster.resourcesVpcConfig.clusterSecurityGroupId" --output text)
-              # bastion_sg=\$(aws ec2 describe-instances --instance-ids \$bastion_id --query "Reservations[].Instances[].SecurityGroups[].GroupId" --output text)
-              # aws ec2 modify-instance-attribute --instance-id \$bastion_id --groups \$bastion_sg \$cluster_sg' > /home/ec2-user/eksctl/security_group.sh
+              echo '#!/bin/bash
+              cluster_name="${EksClusterName}"
+              bastion_id=\$(ec2-metadata -i | cut -d " " -f 2)
+              cluster_sg=\$(aws eks describe-cluster --name \$cluster_name --query "cluster.resourcesVpcConfig.clusterSecurityGroupId" --output text)
+              bastion_sg=\$(aws ec2 describe-instances --instance-ids \$bastion_id --query "Reservations[].Instances[].SecurityGroups[].GroupId" --output text)
+              aws ec2 modify-instance-attribute --instance-id \$bastion_id --groups \$bastion_sg \$cluster_sg' > /home/ec2-user/eksctl/security_group.sh
 
               echo '# eksctl create cluster -f /home/ec2-user/eksctl/cluster.yaml
               apiVersion: eksctl.io/v1alpha5
@@ -650,7 +650,20 @@ Resources:
                 - name: metrics-server
                   resolveConflicts: overwrite
               iam:
-                withOIDC: true # eksctl utils associate-iam-oidc-provider --cluster ${EksClusterName} --approve' > /home/ec2-user/eksctl/cluster.yaml
+                withOIDC: true # eksctl utils associate-iam-oidc-provider --cluster $CLUSTER_NAME --approve' > /home/ec2-user/eksctl/cluster.yaml
+              
+              eksctl create cluster -f /home/ec2-user/eksctl/cluster.yaml
+
+              cd /home/ec2-user
+              git clone https://github.com/AWS-Skills/eks-deepdive.git
+              mkdir -p /home/ec2-user/karpenter
+              mv /home/ec2-user/eks-deepdive/karpenter /home/ec2-user/
+              sed -i 's/export CLUSTER_NAME=""/export CLUSTER_NAME="${EksClusterName}"/g' /home/ec2-user/karpenter/00_install_karpenter.sh
+              sed -i 's/export AWS_REGION=""/export AWS_REGION="${AWS::Region}"/g' /home/ec2-user/karpenter/00_install_karpenter.sh
+              sed -i 's/role: KarpenterNodeRole-/role: KarpenterNodeRole-${EksClusterName}/g' /home/ec2-user/karpenter/01_nodepool.yaml
+              sed -i 's/aws:eks:cluster-name:/aws:eks:cluster-name: ${EksClusterName}/g' /home/ec2-user/karpenter/01_nodepool.yaml
+              chmod +x /home/ec2-user/karpenter/00_install_karpenter.sh
+              /home/ec2-user/karpenter/00_install_karpenter.sh
 
               EOF
 
