@@ -185,8 +185,7 @@ Resources:
             !Sub |
               #!/bin/bash -xe
               exec > >(sudo tee /var/log/user-data.log|sudo sh -c "logger -t user-data -s 2>/dev/console") 2>&1
-              dnf update -y
-              dnf install -y python3-pip
+              dnf update -yq
   BastionEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:

@@ -220,6 +220,7 @@ Resources:
     Type: AWS::EKS::Cluster
     Properties:
       Version: "1.33"
+      BootstrapSelfManagedAddons: True
       AccessConfig: 
         AuthenticationMode: API_AND_CONFIG_MAP
         BootstrapClusterCreatorAdminPermissions: True
@@ -242,12 +243,6 @@ Resources:
       RoleArn: !GetAtt EksClusterIamRole.Arn
       UpgradePolicy: 
         SupportType: STANDARD
-  CorednsAddon:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: coredns
-      ClusterName: !Ref EksCluster
-      ResolveConflicts: OVERWRITE 
   EksClusterIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -273,7 +268,7 @@ Resources:
       PrincipalArn: !GetAtt BastionEc2IamRole.Arn
       Type: STANDARD
       AccessPolicies: 
-        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
           AccessScope:
             Type: cluster
   BastionEc2SecurityGroupIngress:
@@ -375,7 +370,11 @@ Resources:
               --set controller.resources.limits.cpu=1 \
               --set controller.resources.limits.memory=1Gi \
               --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${KarpenterControllerIamRole.Arn}" \
-              --wait' > karpenter.sh
+              --wait' > install_karpenter.sh
+              chmod +x install_karpenter.sh
+
+              sleep 10
+              kubectl -n kube-system rollout restart deployment coredns 
               EOF
   KarpenterControllerIamRole:
     Type: AWS::IAM::Role
@@ -428,24 +427,329 @@ Resources:
       PrincipalArn: !GetAtt KarpenterNodeIamRole.Arn
       Type: EC2_LINUX
 
-# BatchComputeEnvironment:
-#   Type: AWS::Batch::ComputeEnvironment
-#   Properties:
-#     ComputeResources: 
-#       ComputeResources
-#     Context: String
-#     EksConfiguration: 
-#       EksConfiguration
-#     ReplaceComputeEnvironment: Boolean
-#     ServiceRole: String
-#     State: String
-#     Tags: 
-#       Key: Value
-#     Type: String
-#     UnmanagedvCpus: Integer
-#     UpdatePolicy: 
-#       UpdatePolicy
+  BatchAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - KarpenterAssociation
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 300
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        # https://docs.aws.amazon.com/ko_kr/batch/latest/userguide/getting-started-eks.html
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              su - ec2-user << 'SSMEOF'
+              export DEFAULT_NAMESPACE=batch-default
+              export CUSTOM_NAMESPACE=batch-app
+              cat - <<EOF | kubectl create -f -
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: $DEFAULT_NAMESPACE
+                labels:
+                  name: $DEFAULT_NAMESPACE
+              ---
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: $CUSTOM_NAMESPACE
+                labels:
+                  name: $CUSTOM_NAMESPACE
+              EOF
+              cat - <<EOF | kubectl apply -f -
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: aws-batch-cluster-role
+              rules:
+                - apiGroups: [""]
+                  resources: ["namespaces"]
+                  verbs: ["get"]
+                - apiGroups: [""]
+                  resources: ["nodes"]
+                  verbs: ["get", "list", "watch"]
+                - apiGroups: [""]
+                  resources: ["pods"]
+                  verbs: ["get", "list", "watch"]
+                - apiGroups: [""]
+                  resources: ["events"]
+                  verbs: ["list"]
+                - apiGroups: [""]
+                  resources: ["configmaps"]
+                  verbs: ["get", "list", "watch"]
+                - apiGroups: ["apps"]
+                  resources: ["daemonsets", "deployments", "statefulsets", "replicasets"]
+                  verbs: ["get", "list", "watch"]
+                - apiGroups: ["rbac.authorization.k8s.io"]
+                  resources: ["clusterroles", "clusterrolebindings"]
+                  verbs: ["get", "list"]
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: aws-batch-cluster-role-binding
+              subjects:
+              - kind: User
+                name: aws-batch
+                apiGroup: rbac.authorization.k8s.io
+              roleRef:
+                kind: ClusterRole
+                name: aws-batch-cluster-role
+                apiGroup: rbac.authorization.k8s.io
+              EOF
 
+              cat - <<EOF | kubectl apply -f -
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: aws-batch-compute-environment-role
+                namespace: $DEFAULT_NAMESPACE
+              rules:
+                - apiGroups: [""]
+                  resources: ["pods"]
+                  verbs: ["create", "get", "list", "watch", "delete", "patch"]
+                - apiGroups: [""]
+                  resources: ["serviceaccounts"]
+                  verbs: ["get", "list"]
+                - apiGroups: ["rbac.authorization.k8s.io"]
+                  resources: ["roles", "rolebindings"]
+                  verbs: ["get", "list"]
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: aws-batch-compute-environment-role-binding
+                namespace: $DEFAULT_NAMESPACE
+              subjects:
+              - kind: User
+                name: aws-batch
+                apiGroup: rbac.authorization.k8s.io
+              roleRef:
+                kind: Role
+                name: aws-batch-compute-environment-role
+                apiGroup: rbac.authorization.k8s.io
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: aws-batch-compute-environment-role
+                namespace: $CUSTOM_NAMESPACE
+              rules:
+                - apiGroups: [""]
+                  resources: ["pods"]
+                  verbs: ["create", "get", "list", "watch", "delete", "patch"]
+                - apiGroups: [""]
+                  resources: ["serviceaccounts"]
+                  verbs: ["get", "list"]
+                - apiGroups: ["rbac.authorization.k8s.io"]
+                  resources: ["roles", "rolebindings"]
+                  verbs: ["get", "list"]
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: aws-batch-compute-environment-role-binding
+                namespace: $CUSTOM_NAMESPACE
+              subjects:
+              - kind: User
+                name: aws-batch
+                apiGroup: rbac.authorization.k8s.io
+              roleRef:
+                kind: Role
+                name: aws-batch-compute-environment-role
+                apiGroup: rbac.authorization.k8s.io
+              EOF
+
+              eksctl create iamidentitymapping --region ${AWS::Region} \
+              --cluster ${EksCluster} \
+              --arn "arn:aws:iam::${AWS::AccountId}:role/AWSServiceRoleForBatch" \
+              --username aws-batch
+              SSMEOF
+  BatchComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    DependsOn:
+      - BatchAssociation
+    Properties:
+      State: ENABLED
+      EksConfiguration: 
+        EksClusterArn: !GetAtt EksCluster.Arn
+        KubernetesNamespace: batch-default
+      ComputeResources: 
+        Subnets: 
+          - !Ref PrivateSubneta
+          - !Ref PrivateSubnetb
+        SecurityGroupIds: 
+          - !GetAtt EksCluster.ClusterSecurityGroupId
+        MinvCpus: 0
+        # DesiredvCpus:
+        MaxvCpus: 256
+        Type: EC2
+        AllocationStrategy: BEST_FIT_PROGRESSIVE
+        Ec2KeyPair: !Ref KeyPair
+        InstanceRole: !GetAtt BatchNodeInstanceProfile.Arn
+        InstanceTypes: 
+          - optimal
+        Tags:
+          Name: batch-node
+        # ImageId: String
+        # Ec2Configuration: 
+        #   - ImageIdOverride: 
+        #     ImageKubernetesVersion: 
+        #     ImageType: 
+        # LaunchTemplate: 
+        #   LaunchTemplateId: String
+        #   LaunchTemplateName: String
+        #   Overrides: 
+        #     - LaunchTemplateId: 
+        #       LaunchTemplateName: 
+        #       TargetInstanceTypes: []
+        #       UserdataType: # EKS_BOOTSTRAP_SH | EKS_NODEADM
+        #       Version: # Integer | $Default | $Latest
+        #   UserdataType: # EKS_BOOTSTRAP_SH | EKS_NODEADM
+        #   Version: # Integer | $Default | $Latest
+        # PlacementGroup: # EC2 placement group to associate with your compute resources. If you intend to submit multi-node parallel jobs to your compute environment, you should consider creating a cluster placement group and associate it with your compute resources.
+        # SpotIamFleetRole: String
+        UpdateToLatestImageVersion: False
+      ReplaceComputeEnvironment: True
+      UpdatePolicy: 
+        JobExecutionTimeoutMinutes: 30
+        TerminateJobsOnUpdate: False
+      Type: MANAGED
+  BatchNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref BatchNodeIamRole
+  BatchNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  BatchNodeIamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt BatchNodeIamRole.Arn
+      Type: EC2_LINUX
+
+  BatchJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: container
+      EksProperties: 
+        PodProperties:
+          # HostNetwork: True
+          Metadata: 
+            Namespace: batch-app # IF not specified THEN "batch-default"
+            # Annotations: 
+            # Labels: 
+          Containers: 
+            - Name: sleep30s
+              Image: public.ecr.aws/amazonlinux/amazonlinux:latest
+              Command: ["sleep", "30"]
+              Resources:
+                # https://docs.aws.amazon.com/ko_kr/batch/latest/userguide/memory-cpu-batch-eks.html
+                Limits: 
+                  cpu: "0.5"
+                  memory: "512Mi"
+                  # nvidia.com/gpu:
+                Requests: 
+                  cpu: "0.5"
+                  memory: "512Mi"
+                  # nvidia.com/gpu:
+              # Args: []
+              # Env: 
+              #   - Name:
+              #     Value:
+              # ImagePullPolicy: String
+              # SecurityContext: 
+              #   AllowPrivilegeEscalation: Boolean
+              #   Privileged: Boolean
+              #   ReadOnlyRootFilesystem: Boolean
+              #   RunAsGroup: Integer
+              #   RunAsNonRoot: Boolean
+              #   RunAsUser: Integer
+              # VolumeMounts: 
+              #   - MountPath: String
+              #     Name: String
+              #     ReadOnly: Boolean
+              #     SubPath: String
+          # ServiceAccountName: String
+          # Volumes: 
+          #   - Name: String
+          #     EmptyDir: 
+          #       Medium: String
+          #       SizeLimit: String
+          #     HostPath: 
+          #       Path: String
+          #     PersistentVolumeClaim: 
+          #       ClaimName: String
+          #       ReadOnly: Boolean
+          #     Secret: 
+          #       Optional: Boolean
+          #       SecretName: String
+          # InitContainers: []
+          # ImagePullSecrets: 
+          #   - Name: String
+          # DnsPolicy: String
+          # ShareProcessNamespace: Boolean
+      PlatformCapabilities: 
+        - EC2
+      Timeout: 
+        AttemptDurationSeconds: 120
+      # EcsProperties:
+      #   TaskProperties: []
+      # ContainerProperties:
+      # NodeProperties: 
+      # ConsumableResourceProperties: 
+      #   ConsumableResourceList: 
+      #     - ConsumableResource: String
+      #       Quantity: Integer
+      # Parameters: 
+      #   Key: Value
+      # RetryStrategy:
+      #   Attempts: Integer
+      #   EvaluateOnExit: 
+      #     - Action: RETRY | EXIT
+      #       OnExitCode: 
+      #       OnReason: 
+      #       OnStatusReason:
+      # SchedulingPriority: 0 
+  BatchJobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      State: ENABLED
+      JobQueueType: EKS
+      Priority: 1
+      ComputeEnvironmentOrder: 
+        - Order: 1
+          ComputeEnvironment: !GetAtt BatchComputeEnvironment.ComputeEnvironmentArn
+      # JobStateTimeLimitActions: 
+      #   - Action: CANCEL
+      #     MaxTimeSeconds: 600
+      #     Reason: ""
+      #     State: RUNNABLE
+      # SchedulingPolicyArn:
+      # ServiceEnvironmentOrder: 
+      #   - Order: Integer
+      #     ServiceEnvironment: String
 
 Outputs:
   VsCode:
