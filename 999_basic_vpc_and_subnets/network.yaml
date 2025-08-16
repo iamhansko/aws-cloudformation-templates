@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation Template
+Mappings:
+  ResourceMap:
+    Vpc:
+      Name : wsi-vpc
+      CidrBlock: 10.1.0.0/16
+    PublicSubnet:
+      Name: wsi-public
+    PrivateSubnet:
+      Name: wsi-private
+    InternetGateway:
+      Name: wsi-igw
+    NatGateway:
+      Name: wsi-natgw
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [ResourceMap, Vpc, CidrBlock]
+      Tags: 
+        - Key : Name
+          Value : !FindInMap [ResourceMap, Vpc, Name]
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: !Select [0, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PublicSubnet, Name], "a"]]
+      VpcId: !Ref Vpc
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      CidrBlock: !Select [1, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PublicSubnet, Name], "b"]]
+      VpcId: !Ref Vpc
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: !Select [2, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PrivateSubnet, Name], "a"]]
+      VpcId: !Ref Vpc
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      CidrBlock: !Select [3, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PrivateSubnet, Name], "b"]]
+      VpcId: !Ref Vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !FindInMap [ResourceMap, InternetGateway, Name]
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  NatGatewayAElasticIp:
+    Type: AWS::EC2::EIP
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayAElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, NatGateway, Name], "a"]]
+  NatGatewayBElasticIp:
+    Type: AWS::EC2::EIP
+  NatGatewayB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayBElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnetB
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, NatGateway, Name], "b"]]
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PublicSubnet, Name], "rt"]]
+      VpcId: !Ref Vpc
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnetA
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnetB
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  PrivateSubnetARouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PrivateSubnet, Name], "a", "rt"]]
+      VpcId: !Ref Vpc
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateSubnetARouteTable
+      SubnetId: !Ref PrivateSubnetA
+  PrivateSubnetARoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+      RouteTableId: !Ref PrivateSubnetARouteTable
+  PrivateSubnetBRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PrivateSubnet, Name], "b", "rt"]]
+      VpcId: !Ref Vpc
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateSubnetBRouteTable
+      SubnetId: !Ref PrivateSubnetB
+  PrivateSubnetBRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayB
+      RouteTableId: !Ref PrivateSubnetBRouteTable
