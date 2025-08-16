@@ -1,0 +1,672 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  AmazonLinux2023AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Mappings: 
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, b]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, b]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'        
+        Timeout: PT7M
+    Properties:
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      ImageId: !Ref AmazonLinux2023AmiId
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref BastionEc2SecurityGroup
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      Tags: [{ Key: Name, Value: wsc2025-cicd-bastion }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf groupinstall -yq "Development Tools"
+          dnf install -yq python3.13
+          ln -sf /usr/bin/python3.13 /usr/bin/python
+          python -m ensurepip --upgrade
+
+          export VSC_VERSION="4.102.3"
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Bastion EC2 SSH Connection"
+      GroupName: bastion-sg
+      SecurityGroupIngress: 
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+        - CidrIp: 0.0.0.0/0
+          FromPort: 8000
+          IpProtocol: tcp
+          ToPort: 8000
+      VpcId: !Ref Vpc
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref BastionEc2IamRole]
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Version: "1.33"
+      BootstrapSelfManagedAddons: True
+      AccessConfig: 
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: True
+      Logging: 
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      ResourcesVpcConfig: 
+        EndpointPrivateAccess: True
+        EndpointPublicAccess: True
+        SubnetIds: 
+          - !Ref PublicSubneta
+          - !Ref PublicSubnetb
+          - !Ref PrivateSubneta
+          - !Ref PrivateSubnetb
+      RoleArn: !GetAtt EksClusterIamRole.Arn
+      UpgradePolicy: 
+        SupportType: STANDARD
+  EksClusterIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  EksOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList: 
+        - sts.amazonaws.com
+  BastionEc2IamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt BastionEc2IamRole.Arn
+      Type: STANDARD
+      AccessPolicies: 
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          AccessScope:
+            Type: cluster
+  BastionEc2SecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      IpProtocol: -1
+      SourceSecurityGroupId: !GetAtt BastionEc2SecurityGroup.GroupId
+
+  KubesystemFargateProfile:
+    Type: AWS::EKS::FargateProfile
+    Properties:
+      ClusterName: !Ref EksCluster
+      PodExecutionRoleArn: !GetAtt FargatePodExecutionIamRole.Arn
+      Subnets: 
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetb
+      Selectors:
+        - Namespace: kube-system
+  FargatePodExecutionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks-fargate-pods.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              ArnLike:
+                "aws:SourceArn": !Sub "arn:aws:eks:${AWS::Region}:${AWS::AccountId}:fargateprofile/${EksCluster}/*"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy
+  
+  KarpenterAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - KubesystemFargateProfile
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 300
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              dnf install -yq git
+              dnf install -yq docker
+              dnf install -yq bash-completion
+              systemctl enable --now docker
+              # usermod -aG docker ec2-user
+              # newgrp docker
+              chmod 666 /var/run/docker.sock
+
+              su - ec2-user << 'EOF'
+              export HOME=/home/ec2-user
+              cd $HOME
+              curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.0/2025-05-01/bin/linux/amd64/kubectl
+              chmod +x ./kubectl
+              mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$HOME/bin:$PATH
+              echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
+              echo 'source /usr/share/bash-completion/bash_completion' >> ~/.bashrc
+              echo 'source <(kubectl completion bash)' >> ~/.bashrc
+              echo 'alias k=kubectl' >>~/.bashrc
+              echo 'complete -o default -F __start_kubectl k' >>~/.bashrc
+
+              ARCH=amd64
+              PLATFORM=$(uname -s)_$ARCH
+              curl -sLO "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
+              tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm eksctl_$PLATFORM.tar.gz
+              sudo install -m 0755 /tmp/eksctl /usr/local/bin && rm /tmp/eksctl
+
+              curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+              chmod 700 get_helm.sh
+              ./get_helm.sh
+
+              aws eks update-kubeconfig --name ${EksCluster}
+
+              echo $'#!/bin/bash
+              export KARPENTER_NAMESPACE="kube-system"
+              export KARPENTER_VERSION="1.6.0"
+              export K8S_VERSION="1.33"
+              export AWS_PARTITION="aws"
+              export CLUSTER_NAME="${EksCluster}"
+              export AWS_DEFAULT_REGION="${AWS::Region}"
+              export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+              export TEMPOUT="$(mktemp)"
+              helm registry logout public.ecr.aws
+              helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
+              --version "$KARPENTER_VERSION" \
+              --namespace "$KARPENTER_NAMESPACE" --create-namespace \
+              --set "settings.clusterName=$CLUSTER_NAME" \
+              --set controller.resources.requests.cpu=1 \
+              --set controller.resources.requests.memory=1Gi \
+              --set controller.resources.limits.cpu=1 \
+              --set controller.resources.limits.memory=1Gi \
+              --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${KarpenterControllerIamRole.Arn}" \
+              --wait' > install_karpenter.sh
+              chmod +x install_karpenter.sh
+
+              sleep 10
+              kubectl -n kube-system rollout restart deployment coredns 
+              EOF
+  KarpenterControllerIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Effect": "Allow",
+                      "Principal": {
+                          "Federated": "${EksOidcProvider.Arn}"
+                      },
+                      "Action": "sts:AssumeRoleWithWebIdentity",
+                      "Condition": {
+                          "StringEquals": {
+                              "${OidcProvider}:sub": "system:serviceaccount:kube-system:karpenter",
+                              "${OidcProvider}:aud": "sts.amazonaws.com"
+                          }
+                      }
+                  }
+              ]
+            }
+        - OidcProvider: !Select [1, !Split ['//', !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns:
+        # https://raw.githubusercontent.com/aws/karpenter-provider-aws/v1.6.0/website/content/en/preview/getting-started/getting-started-with-karpenter/cloudformation.yaml
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  KarpenterNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  KarpenterNodeIamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt KarpenterNodeIamRole.Arn
+      Type: EC2_LINUX
+
+  BatchAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - KarpenterAssociation
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 300
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        # https://docs.aws.amazon.com/ko_kr/batch/latest/userguide/getting-started-eks.html
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              su - ec2-user << 'SSMEOF'
+              export DEFAULT_NAMESPACE=batch-default
+              export CUSTOM_NAMESPACE=batch-app
+              cat - <<EOF | kubectl create -f -
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: $DEFAULT_NAMESPACE
+                labels:
+                  name: $DEFAULT_NAMESPACE
+              ---
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: $CUSTOM_NAMESPACE
+                labels:
+                  name: $CUSTOM_NAMESPACE
+              EOF
+              cat - <<EOF | kubectl apply -f -
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: aws-batch-cluster-role
+              rules:
+                - apiGroups: [""]
+                  resources: ["namespaces"]
+                  verbs: ["get"]
+                - apiGroups: [""]
+                  resources: ["nodes"]
+                  verbs: ["get", "list", "watch"]
+                - apiGroups: [""]
+                  resources: ["pods"]
+                  verbs: ["get", "list", "watch"]
+                - apiGroups: [""]
+                  resources: ["events"]
+                  verbs: ["list"]
+                - apiGroups: [""]
+                  resources: ["configmaps"]
+                  verbs: ["get", "list", "watch"]
+                - apiGroups: ["apps"]
+                  resources: ["daemonsets", "deployments", "statefulsets", "replicasets"]
+                  verbs: ["get", "list", "watch"]
+                - apiGroups: ["rbac.authorization.k8s.io"]
+                  resources: ["clusterroles", "clusterrolebindings"]
+                  verbs: ["get", "list"]
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: aws-batch-cluster-role-binding
+              subjects:
+              - kind: User
+                name: aws-batch
+                apiGroup: rbac.authorization.k8s.io
+              roleRef:
+                kind: ClusterRole
+                name: aws-batch-cluster-role
+                apiGroup: rbac.authorization.k8s.io
+              EOF
+
+              cat - <<EOF | kubectl apply -f -
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: aws-batch-compute-environment-role
+                namespace: $DEFAULT_NAMESPACE
+              rules:
+                - apiGroups: [""]
+                  resources: ["pods"]
+                  verbs: ["create", "get", "list", "watch", "delete", "patch"]
+                - apiGroups: [""]
+                  resources: ["serviceaccounts"]
+                  verbs: ["get", "list"]
+                - apiGroups: ["rbac.authorization.k8s.io"]
+                  resources: ["roles", "rolebindings"]
+                  verbs: ["get", "list"]
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: aws-batch-compute-environment-role-binding
+                namespace: $DEFAULT_NAMESPACE
+              subjects:
+              - kind: User
+                name: aws-batch
+                apiGroup: rbac.authorization.k8s.io
+              roleRef:
+                kind: Role
+                name: aws-batch-compute-environment-role
+                apiGroup: rbac.authorization.k8s.io
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: aws-batch-compute-environment-role
+                namespace: $CUSTOM_NAMESPACE
+              rules:
+                - apiGroups: [""]
+                  resources: ["pods"]
+                  verbs: ["create", "get", "list", "watch", "delete", "patch"]
+                - apiGroups: [""]
+                  resources: ["serviceaccounts"]
+                  verbs: ["get", "list"]
+                - apiGroups: ["rbac.authorization.k8s.io"]
+                  resources: ["roles", "rolebindings"]
+                  verbs: ["get", "list"]
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: aws-batch-compute-environment-role-binding
+                namespace: $CUSTOM_NAMESPACE
+              subjects:
+              - kind: User
+                name: aws-batch
+                apiGroup: rbac.authorization.k8s.io
+              roleRef:
+                kind: Role
+                name: aws-batch-compute-environment-role
+                apiGroup: rbac.authorization.k8s.io
+              EOF
+
+              eksctl create iamidentitymapping --region ${AWS::Region} \
+              --cluster ${EksCluster} \
+              --arn "arn:aws:iam::${AWS::AccountId}:role/AWSServiceRoleForBatch" \
+              --username aws-batch
+              SSMEOF
+  BatchComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    DependsOn:
+      - BatchAssociation
+    Properties:
+      State: ENABLED
+      EksConfiguration: 
+        EksClusterArn: !GetAtt EksCluster.Arn
+        KubernetesNamespace: batch-default
+      ComputeResources: 
+        Subnets: 
+          - !Ref PrivateSubneta
+          - !Ref PrivateSubnetb
+        SecurityGroupIds: 
+          - !GetAtt EksCluster.ClusterSecurityGroupId
+        MinvCpus: 0
+        # DesiredvCpus:
+        MaxvCpus: 256
+        Type: EC2
+        AllocationStrategy: BEST_FIT_PROGRESSIVE
+        Ec2KeyPair: !Ref KeyPair
+        InstanceRole: !GetAtt BatchNodeInstanceProfile.Arn
+        InstanceTypes: 
+          - optimal
+        Tags:
+          Name: batch-node
+        UpdateToLatestImageVersion: False
+      ReplaceComputeEnvironment: True
+      UpdatePolicy: 
+        JobExecutionTimeoutMinutes: 30
+        TerminateJobsOnUpdate: False
+      Type: MANAGED
+  BatchNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref BatchNodeIamRole
+  BatchNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  BatchNodeIamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt BatchNodeIamRole.Arn
+      Type: EC2_LINUX
+
+  BatchJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: container
+      EksProperties: 
+        PodProperties:
+          # HostNetwork: True
+          Metadata: 
+            Namespace: batch-app # IF not specified THEN "batch-default"
+          Containers: 
+            - Name: sleep30s
+              Image: public.ecr.aws/amazonlinux/amazonlinux:latest
+              Command: ["sleep", "30"]
+              Resources:
+                # https://docs.aws.amazon.com/ko_kr/batch/latest/userguide/memory-cpu-batch-eks.html
+                Limits: 
+                  cpu: "0.5"
+                  memory: "512Mi"
+                Requests: 
+                  cpu: "0.5"
+                  memory: "512Mi"
+      PlatformCapabilities: 
+        - EC2
+      Timeout: 
+        AttemptDurationSeconds: 120
+  BatchJobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      State: ENABLED
+      JobQueueType: EKS
+      Priority: 1
+      ComputeEnvironmentOrder: 
+        - Order: 1
+          ComputeEnvironment: !GetAtt BatchComputeEnvironment.ComputeEnvironmentArn
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${BastionEc2.PublicIp}:8000
+    Description: VsCode on BastionEC2
