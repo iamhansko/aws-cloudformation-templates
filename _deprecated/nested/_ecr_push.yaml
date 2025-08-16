@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation Template"
+
+Resources:
+  GolangEcr:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: True
+
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: "https://iamhanskogithub.s3.ap-southeast-2.amazonaws.com/nested/vpc_and_more.yaml"
+      Parameters:
+        Prefix: ops
+        VpcCidrBlock: 10.0.0.0/16
+        NumberOfPublicSubnets: 1
+        NumberOfPrivateSubnets: 0
+        EnableDnsHostnamesOption: true
+        EnableDnsResolutionOption: true
+
+  VscodeOnEc2Stack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: "https://iamhanskogithub.s3.ap-southeast-2.amazonaws.com/nested/vscode_on_ec2.yaml"
+      Parameters:
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PublicSubnetId: !GetAtt NetworkStack.Outputs.PublicSubnet1Id
+        AmiId: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+        InstanceType: t3.small
+        SsmCommandWaitForSuccessTimeoutSeconds: 420
+        SsmRunCommandShellScript: !Sub |
+          su - ec2-user <<'EOF'
+          mkdir -p /home/ec2-user/api
+
+          echo 'package main
+          import (
+              "fmt"
+              "net/http"
+          )
+          func healthcheck(w http.ResponseWriter, req *http.Request) {
+              fmt.Fprint(w, "OK")
+          }
+          func main() {
+              http.HandleFunc("/healthcheck", healthcheck)
+              http.ListenAndServe(":8080", nil)
+          }' > /home/ec2-user/api/main.go
+          
+          sudo dnf install -y golang
+          mkdir -p /home/ec2-user/.cache/go-build
+          chown -R ec2-user:ec2-user /home/ec2-user/.cache
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOCACHE=/home/ec2-user/.cache/go-build go build -o /home/ec2-user/api/golang-api-amd64 /home/ec2-user/api/main.go
+
+          echo 'FROM alpine
+          WORKDIR /app
+          COPY golang-api-amd64 .
+          RUN apk add --no-cache curl
+          RUN apk --no-cache add ca-certificates && apk --no-cache upgrade
+          RUN adduser -D appuser
+          RUN chown appuser:appuser ./golang-api-amd64
+          RUN chmod +x ./golang-api-amd64
+          USER appuser
+          EXPOSE 8080
+          CMD ["./golang-api-amd64"]' > /home/ec2-user/api/Dockerfile
+          
+          IMAGE_TAG=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${GolangEcr}:latest
+          
+          aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+          docker build -t $IMAGE_TAG /home/ec2-user/api
+          docker push $IMAGE_TAG 
+          EOF
+
+Outputs:
+  CloudFrontDomainName: 
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.CloudFrontDomainName
+  Ec2InstanceId:
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.Ec2InstanceId
+  Ec2IamRoleArn:
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.Ec2IamRoleArn
+  Ec2PublicIp:
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.Ec2PublicIp
+  Ec2PublicDnsName:
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.Ec2PublicDnsName
+  Ec2SecurityGroup:
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.Ec2SecurityGroup

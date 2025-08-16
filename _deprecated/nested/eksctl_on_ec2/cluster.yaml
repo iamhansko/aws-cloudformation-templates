@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation Template"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: EKS Cluster
+        Parameters:
+          - EksClusterName
+          - EksClusterVersion
+      - Label:
+          default: EKS Managed Node Group (MNG)
+        Parameters:
+          - EksMngAmiFamily
+          - EksMngInstanceType
+          - EksMngDesiredCapacity
+          - EksMngEnableSpot
+
+Parameters:
+  EksClusterName:
+    Type: String
+    Default: eks-cluster
+    AllowedPattern: ".+"
+    ConstraintDescription: "Parameter [EksClusterName] is invalid"
+  EksClusterVersion:
+    Type: String
+    Default: 1.31
+    AllowedValues:
+      # - 1.32
+      - 1.31
+      - 1.30
+      - 1.29
+      - 1.28
+      - 1.27
+      - 1.26
+      - 1.25
+    ConstraintDescription: "Parameter [EksClusterVersion] is invalid"
+  EksMngAmiFamily:
+    Type: String
+    Default: AmazonLinux2023
+    AllowedValues:
+      - AmazonLinux2023
+      - AmazonLinux2
+      - UbuntuPro2204
+      - Ubuntu2204
+      - Ubuntu2004
+      - Ubuntu1804
+      - Bottlerocket
+      - WindowsServer2022CoreContainer
+      - WindowsServer2022FullContainer
+      - WindowsServer2019CoreContainer
+      - WindowsServer2019FullContainer
+    ConstraintDescription: "Parameter [EksMngAmiFamily] is invalid"
+  EksMngInstanceType:
+    Type: String
+    Default: t3.xlarge
+    AllowedValues:
+      - t1.micro
+      - t2.2xlarge
+      - t2.large
+      - t2.medium
+      - t2.micro
+      - t2.nano
+      - t2.small
+      - t2.xlarge
+      - t3.2xlarge
+      - t3.large
+      - t3.medium
+      - t3.micro
+      - t3.nano
+      - t3.small
+      - t3.xlarge
+      - t3a.2xlarge
+      - t3a.large
+      - t3a.medium
+      - t3a.micro
+      - t3a.nano
+      - t3a.small
+      - t3a.xlarge
+      - t4g.2xlarge
+      - t4g.large
+      - t4g.medium
+      - t4g.micro
+      - t4g.nano
+      - t4g.small
+      - t4g.xlarge
+    ConstraintDescription: "Parameter [EksMngInstanceType] is invalid"
+  EksMngDesiredCapacity:
+    Type: Number
+    Default: 3
+    MinValue: 0
+    MaxValue: 6
+    ConstraintDescription: "Parameter [EksMngDesiredCapacity] is invalid"
+  EksMngEnableSpot:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    ConstraintDescription: "Parameter [EksMngEnableSpot] is invalid"
+
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: "https://iamhanskogithub.s3.ap-southeast-2.amazonaws.com/nested/vpc_and_more.yaml"
+      Parameters:
+        Prefix: eks
+        VpcCidrBlock: 10.0.0.0/16
+        NumberOfPublicSubnets: 3
+        NumberOfPrivateSubnets: 3
+        EnableDnsHostnamesOption: true
+        EnableDnsResolutionOption: true
+
+  VscodeOnEc2Stack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: "https://iamhanskogithub.s3.ap-southeast-2.amazonaws.com/nested/vscode_on_ec2.yaml"
+      Parameters:
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PublicSubnetId: !GetAtt NetworkStack.Outputs.PublicSubnet1Id
+        AmiId: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+        InstanceType: t3.small
+        SsmCommandWaitForSuccessTimeoutSeconds: 3600
+        SsmRunCommandShellScript: !Sub 
+          # https://docs.aws.amazon.com/ko_kr/eks/latest/userguide/install-kubectl.html#_step_2_install_or_update_kubectl
+          - |
+            su - ec2-user << EOF
+            mkdir -p /home/ec2-user/bin
+            curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.31.2/2024-11-15/bin/linux/amd64/kubectl
+            chmod +x kubectl
+            mv kubectl /home/ec2-user/bin/kubectl
+            export PATH=/home/ec2-user/bin:$PATH
+            echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+            echo "alias k=kubectl" >> ~/.bashrc
+            echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+            echo "source <(kubectl completion bash)" >> ~/.bashrc
+
+            curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+            sudo mv /tmp/eksctl /usr/local/bin
+            aws configure set default.region ${AWS::Region}
+
+            curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
+            chmod 700 /home/ec2-user/get_helm.sh
+            /home/ec2-user/get_helm.sh
+
+            mkdir -p /home/ec2-user/eksctl
+            echo 'apiVersion: eksctl.io/v1alpha5
+            kind: ClusterConfig
+            metadata:
+              name: ${EksClusterName}
+              region: ${AWS::Region}
+              version: "${EksClusterVersion}"
+            vpc:
+              id: ${Vpc}
+              subnets:
+                public:
+                  public1:
+                    id: ${PublicSubnet1}
+                  public2:
+                    id: ${PublicSubnet2}
+                  public3:
+                    id: ${PublicSubnet3}
+                private:
+                  private1:
+                    id: ${PrivateSubnet1}
+                  private2:
+                    id: ${PrivateSubnet2}
+                  private3:
+                    id: ${PrivateSubnet3}
+            addons:
+              - name: coredns
+                resolveConflicts: overwrite
+              - name: kube-proxy
+                resolveConflicts: overwrite
+              - name: metrics-server
+                resolveConflicts: overwrite
+              - name: vpc-cni
+                resolveConflicts: overwrite
+              - name: eks-pod-identity-agent
+                resolveConflicts: overwrite
+              - name: amazon-cloudwatch-observability
+                resolveConflicts: overwrite
+            managedNodeGroups:
+              - name: nodegroup
+                amiFamily: ${EksMngAmiFamily}
+                spot: ${EksMngEnableSpot}
+                instanceType: ${EksMngInstanceType}
+                desiredCapacity: ${EksMngDesiredCapacity}
+                privateNetworking: true
+                disableIMDSv1: true
+                iam:
+                  attachPolicyARNs:
+                    - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+                    - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+                    - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+                    - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+                    - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+                    - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy' > /home/ec2-user/eksctl/cluster.yaml
+            
+            eksctl create cluster -f /home/ec2-user/eksctl/cluster.yaml
+
+            EOF
+          - Vpc: !GetAtt NetworkStack.Outputs.VpcId
+            PublicSubnet1: !GetAtt NetworkStack.Outputs.PublicSubnet1Id
+            PublicSubnet2: !GetAtt NetworkStack.Outputs.PublicSubnet2Id
+            PublicSubnet3: !GetAtt NetworkStack.Outputs.PublicSubnet3Id
+            PrivateSubnet1: !GetAtt NetworkStack.Outputs.PrivateSubnet1Id
+            PrivateSubnet2: !GetAtt NetworkStack.Outputs.PrivateSubnet2Id
+            PrivateSubnet3: !GetAtt NetworkStack.Outputs.PrivateSubnet3Id
+
+Outputs:
+  CloudFrontDomainName: 
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.CloudFrontDomainName
+  EksClusterName:
+    Value: !Ref EksClusterName
+  Ec2InstanceId:
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.Ec2InstanceId
+  Ec2IamRoleArn:
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.Ec2IamRoleArn
+  Ec2PublicIp:
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.Ec2PublicIp
+  Ec2PublicDnsName:
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.Ec2PublicDnsName
+  Ec2SecurityGroup:
+    Value: !GetAtt VscodeOnEc2Stack.Outputs.Ec2SecurityGroup
+  VpcId: 
+    Value: !GetAtt NetworkStack.Outputs.VpcId
+  PublicSubnet1Id:
+    Value: !GetAtt NetworkStack.Outputs.PublicSubnet1Id
+  PublicSubnet2Id:
+    Value: !GetAtt NetworkStack.Outputs.PublicSubnet2Id
+  PublicSubnet3Id:
+    Value: !GetAtt NetworkStack.Outputs.PublicSubnet3Id
+  PrivateSubnet1Id:
+    Value: !GetAtt NetworkStack.Outputs.PrivateSubnet1Id
+  PrivateSubnet2Id:
+    Value: !GetAtt NetworkStack.Outputs.PrivateSubnet2Id
+  PrivateSubnet3Id:
+    Value: !GetAtt NetworkStack.Outputs.PrivateSubnet3Id

@@ -1,0 +1,731 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template
+
+Mappings:
+  # https://aws.amazon.com/ko/blogs/korea/limit-access-to-your-origins-using-the-aws-managed-prefix-list-for-amazon-cloudfront
+  # aws ec2 describe-managed-prefix-lists --region <REGION> | jq -r '.PrefixLists[] | select (.PrefixListName == "com.amazonaws.global.cloudfront.origin-facing") | .PrefixListId'
+  AWSRegions2PrefixListID:
+    ap-northeast-1:
+      PrefixList: pl-58a04531
+    ap-northeast-2:
+      PrefixList: pl-22a6434b
+    ap-northeast-3:
+      PrefixList: pl-31a14458
+    ap-south-1:
+      PrefixList: pl-9aa247f3
+    ap-southeast-1:
+      PrefixList: pl-31a34658
+    ap-southeast-2:
+      PrefixList: pl-b8a742d1
+    ca-central-1:
+      PrefixList: pl-38a64351
+    eu-central-1:
+      PrefixList: pl-a3a144ca
+    eu-north-1:
+      PrefixList: pl-fab65393
+    eu-west-1:
+      PrefixList: pl-4fa04526
+    eu-west-2:
+      PrefixList: pl-93a247fa
+    eu-west-3:
+      PrefixList: pl-75b1541c
+    sa-east-1:
+      PrefixList: pl-5da64334
+    us-east-1:
+      PrefixList: pl-3b927c52
+    us-east-2:
+      PrefixList: pl-b6a144df
+    us-west-1:
+      PrefixList: pl-4ea04527
+    us-west-2:
+      PrefixList: pl-82a045eb
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: EKS Cluster
+        Parameters:
+          - EksClusterName
+          - EksClusterVersion
+      - Label:
+          default: EKS Managed Node Group (MNG)
+        Parameters:
+          - EksMngAmiFamily
+          - EksMngInstanceType
+          - EksMngDesiredCapacity
+      - Label:
+          default: Network
+        Parameters:
+          - Prefix
+          - VpcCidrBlock
+          - EnableDnsHostnamesOption
+          - EnableDnsResolutionOption
+      - Label:
+          default: VsCodeOnEc2
+        Parameters:
+          - AmiId
+          - InstanceType
+
+Parameters:
+  EksClusterName:
+    Type: String
+    Default: eks-cluster
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [EksClusterName] is invalid
+  EksClusterVersion:
+    Type: String
+    Default: 1.32
+    AllowedValues:
+      - 1.32
+      - 1.31
+      - 1.3
+      - 1.29
+      - 1.28
+      - 1.27
+      - 1.26
+      - 1.25
+    ConstraintDescription: Parameter [EksClusterVersion] is invalid
+  EksMngAmiFamily:
+    Type: String
+    Default: AmazonLinux2023
+    AllowedValues:
+      - AmazonLinux2023
+      - AmazonLinux2
+      - UbuntuPro2204
+      - Ubuntu2204
+      - Ubuntu2004
+      - Ubuntu1804
+      - Bottlerocket
+      - WindowsServer2022CoreContainer
+      - WindowsServer2022FullContainer
+      - WindowsServer2019CoreContainer
+      - WindowsServer2019FullContainer
+    ConstraintDescription: Parameter [EksMngAmiFamily] is invalid
+  EksMngInstanceType:
+    Type: String
+    Default: t3.large
+    AllowedValues:
+      - t1.micro
+      - t2.2xlarge
+      - t2.large
+      - t2.medium
+      - t2.micro
+      - t2.nano
+      - t2.small
+      - t2.xlarge
+      - t3.2xlarge
+      - t3.large
+      - t3.medium
+      - t3.micro
+      - t3.nano
+      - t3.small
+      - t3.xlarge
+      - t3a.2xlarge
+      - t3a.large
+      - t3a.medium
+      - t3a.micro
+      - t3a.nano
+      - t3a.small
+      - t3a.xlarge
+      - t4g.2xlarge
+      - t4g.large
+      - t4g.medium
+      - t4g.micro
+      - t4g.nano
+      - t4g.small
+      - t4g.xlarge
+    ConstraintDescription: Parameter [EksMngInstanceType] is invalid
+  EksMngDesiredCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 0
+    MaxValue: 6
+    ConstraintDescription: Parameter [EksMngDesiredCapacity] is invalid
+  Prefix:
+    Description: Name Tag Auto-generation ("project" -> project-vpc, project-igw, ...)
+    Type: String
+    Default: eks
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [Prefix] must not be empty
+  VpcCidrBlock:
+    Description: CIDR Block for the VPC to Create (ex 10.0.0.0/16)
+    Type: String
+    Default: 10.0.0.0/16
+    AllowedPattern: (([1-9]{0,1}[0-9]{0,2}|2[0-4][0-9]|25[0-5])\.){3}([1-9]{0,1}[0-9]{0,2}|2[0-4][0-9]|25[0-5])\/([1-2][0-9]|3[0-1])
+    ConstraintDescription: Parameter [VpcCidrBlock] is invalid
+  EnableDnsHostnamesOption:
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  EnableDnsResolutionOption:
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  AmiId:
+    Description: EC2 AMI Id
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    AllowedValues:
+      # aws ssm get-parameters-by-path --path /aws/service/ami-amazon-linux-latest --query 'Parameters[].Name'
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-6.1-arm64
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-6.1-x86_64
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64
+      - /aws/service/ami-amazon-linux-latest/amzn-ami-hvm-x86_64-gp2
+      - /aws/service/ami-amazon-linux-latest/amzn-ami-hvm-x86_64-s3
+      - /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-ebs
+      - /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+      - /aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-x86_64-ebs
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64
+      - /aws/service/ami-amazon-linux-latest/amzn-ami-hvm-x86_64-ebs
+      - /aws/service/ami-amazon-linux-latest/amzn-ami-minimal-hvm-x86_64-ebs
+      - /aws/service/ami-amazon-linux-latest/amzn-ami-minimal-hvm-x86_64-s3
+      - /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-arm64-gp2
+      - /aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-arm64-gp2
+      - /aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-x86_64-gp2
+      - /aws/service/ami-amazon-linux-latest/amzn2-ami-minimal-hvm-arm64-ebs
+      - /aws/service/ami-amazon-linux-latest/amzn2-ami-minimal-hvm-x86_64-ebs
+  InstanceType:
+    Description: EC2 Instance Type
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t1.micro
+      - t2.2xlarge
+      - t2.large
+      - t2.medium
+      - t2.micro
+      - t2.nano
+      - t2.small
+      - t2.xlarge
+      - t3.2xlarge
+      - t3.large
+      - t3.medium
+      - t3.micro
+      - t3.nano
+      - t3.small
+      - t3.xlarge
+      - t3a.2xlarge
+      - t3a.large
+      - t3a.medium
+      - t3a.micro
+      - t3a.nano
+      - t3a.small
+      - t3a.xlarge
+      - t4g.2xlarge
+      - t4g.large
+      - t4g.medium
+      - t4g.micro
+      - t4g.nano
+      - t4g.small
+      - t4g.xlarge
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidrBlock
+      EnableDnsSupport: !Ref EnableDnsResolutionOption
+      EnableDnsHostnames: !Ref EnableDnsHostnamesOption # for EC2 PublicDnsName, ...
+      Tags:
+        - Key: Name
+          Value: !Ref Prefix
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-rtb-public
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+
+  # Public Subnet 1 (AZ a)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: !Select
+        - 0
+        - !Cidr
+          - !GetAtt Vpc.CidrBlock
+          - 6
+          - 8
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-subnet-public1-${AWS::Region}a
+        - Key: kubernetes.io/role/elb
+          Value: 1
+      VpcId: !Ref Vpc
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  # Public Subnet 2 (AZ b)
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}b
+      CidrBlock: !Select
+        - 1
+        - !Cidr
+          - !GetAtt Vpc.CidrBlock
+          - 6
+          - 8
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-subnet-public2-${AWS::Region}b
+        - Key: kubernetes.io/role/elb
+          Value: 1
+      VpcId: !Ref Vpc
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  # Private Subnet 1 (AZ a)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: !Select
+        - 3
+        - !Cidr
+          - !GetAtt Vpc.CidrBlock
+          - 6
+          - 8
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-subnet-private1-${AWS::Region}a
+        - Key: kubernetes.io/role/internal-elb
+          Value: 1
+      VpcId: !Ref Vpc
+  NatGateway1ElasticIp:
+    Type: AWS::EC2::EIP
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1ElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-nat-public1-${AWS::Region}a
+  PrivateSubnet1RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-rtb-private1-${AWS::Region}a
+      VpcId: !Ref Vpc
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateSubnet1RouteTable
+      SubnetId: !Ref PrivateSubnet1
+  PrivateSubnet1Route:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+      RouteTableId: !Ref PrivateSubnet1RouteTable
+
+  # Private Subnet 2 (AZ b)
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}b
+      CidrBlock: !Select
+        - 4
+        - !Cidr
+          - !GetAtt Vpc.CidrBlock
+          - 6
+          - 8
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-subnet-private2-${AWS::Region}b
+        - Key: kubernetes.io/role/internal-elb
+          Value: 1
+      VpcId: !Ref Vpc
+  NatGateway2ElasticIp:
+    Type: AWS::EC2::EIP
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2ElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-nat-public2-${AWS::Region}b
+  PrivateSubnet2RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-rtb-private2-${AWS::Region}b
+      VpcId: !Ref Vpc
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateSubnet2RouteTable
+      SubnetId: !Ref PrivateSubnet2
+  PrivateSubnet2Route:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+      RouteTableId: !Ref PrivateSubnet2RouteTable
+
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Join
+        - '-'
+        - - key
+          - !Select
+            - 4
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - /
+                  - !Ref AWS::StackId
+  VsCodeOnEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT10M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet1
+          GroupSet:
+            - !Ref VsCodeOnEc2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeOnEc2InstanceProfile
+      UserData:
+        # https://docs.aws.amazon.com/ko_kr/eks/latest/userguide/install-kubectl.html#_step_2_install_or_update_kubectl
+        !Base64
+        Fn::Sub: |
+          #!/bin/bash
+
+          dnf update -y
+          dnf install -y -q git
+          dnf groupinstall -y -q "Development Tools"
+          dnf install -y -q python3.12
+          python3.12 -m ensurepip --upgrade
+          python3.12 -m pip install --upgrade pip
+          ln -sf /usr/bin/python3.12 /usr/bin/python
+          echo "alias pip=pip3" >> ~/.bashrc
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeOnEc2 --region ${AWS::Region}
+
+          export CODE_SERVER_VERSION="4.96.4"
+          wget -q https://github.com/coder/code-server/releases/download/v$CODE_SERVER_VERSION/code-server-$CODE_SERVER_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$CODE_SERVER_VERSION-linux-amd64.tar.gz
+          mv code-server-$CODE_SERVER_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable --now code-server
+
+          dnf install -y -q docker
+          systemctl enable --now docker
+          # usermod -aG docker ec2-user
+          # newgrp docker
+          # VS Code Server Terminal(Bash) Deletes "docker" group...
+          chmod 666 /var/run/docker.sock
+  VsCodeOnEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for VS Code EC2 SSH Connection
+      GroupName: !Join
+        - '-'
+        - - vscode-ec2-sg
+          - !Select
+            - 4
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - /
+                  - !Ref AWS::StackId
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: com.amazonaws.global.cloudfront.origin-facing
+          IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourcePrefixListId: !FindInMap
+            - AWSRegions2PrefixListID
+            - !Ref AWS::Region
+            - PrefixList
+  VsCodeOnEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeOnEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref VsCodeOnEc2IamRole
+  # https://docs.aws.amazon.com/ko_kr/AmazonCloudFront/latest/DeveloperGuide/distribution-working-with.websockets.html
+  # https://github.com/aws-samples/code-server-setup-with-cloudformation/blob/main/code-server-stack.yaml
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt VsCodeOnEc2.PublicDnsName
+            Id: !GetAtt VsCodeOnEc2.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 8000
+              OriginProtocolPolicy: http-only
+        Enabled: true
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          ForwardedValues:
+            QueryString: 'false'
+          Compress: false
+          TargetOriginId: !GetAtt VsCodeOnEc2.PublicDnsName
+          ViewerProtocolPolicy: allow-all
+          CachePolicyId: !Ref CloudFrontCachePolicy
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # AllViewer
+  CloudFrontCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 1
+        Name: !Join
+          - '-'
+          - - VSCode
+            - !Select
+              - 4
+              - !Split
+                - '-'
+                - !Select
+                  - 2
+                  - !Split
+                    - /
+                    - !Ref AWS::StackId
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: all
+          EnableAcceptEncodingGzip: false
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+              - Accept-Charset
+              - Authorization
+              - Origin
+              - Accept
+              - Referer
+              - Host
+              - Accept-Language
+              - Accept-Encoding
+              - Accept-Datetime
+          QueryStringsConfig:
+            QueryStringBehavior: all
+
+  SsmAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 1800
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref VsCodeOnEc2
+      Parameters:
+        commands:
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+            su - ec2-user << EOF
+            mkdir -p /home/ec2-user/bin
+            curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.31.2/2024-11-15/bin/linux/amd64/kubectl
+            chmod +x kubectl
+            mv kubectl /home/ec2-user/bin/kubectl
+            export PATH=/home/ec2-user/bin:$PATH
+            echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+            echo "alias k=kubectl" >> ~/.bashrc
+            echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+            echo "source <(kubectl completion bash)" >> ~/.bashrc
+
+            curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+            sudo mv /tmp/eksctl /usr/local/bin
+            aws configure set default.region ${AWS::Region}
+
+            curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
+            chmod 700 /home/ec2-user/get_helm.sh
+            /home/ec2-user/get_helm.sh
+
+            mkdir -p /home/ec2-user/eksctl
+
+            echo '#!/bin/bash
+            cluster_name="${EksClusterName}"
+            bastion_id=\$(ec2-metadata -i | cut -d " " -f 2)
+            cluster_sg=\$(aws eks describe-cluster --name \$cluster_name --query "cluster.resourcesVpcConfig.clusterSecurityGroupId" --output text)
+            bastion_sg=\$(aws ec2 describe-instances --instance-ids \$bastion_id --query "Reservations[].Instances[].SecurityGroups[].GroupId" --output text)
+            aws ec2 modify-instance-attribute --instance-id \$bastion_id --groups \$bastion_sg \$cluster_sg' > /home/ec2-user/eksctl/security_group.sh
+
+            echo '# eksctl create cluster -f /home/ec2-user/eksctl/cluster.yaml
+            apiVersion: eksctl.io/v1alpha5
+            kind: ClusterConfig
+            metadata:
+              name: ${EksClusterName}
+              region: ${AWS::Region}
+              version: "${EksClusterVersion}"
+            vpc:
+              id: ${Vpc}
+              subnets:
+                public:
+                  public1:
+                    id: ${PublicSubnet1}
+                  public2:
+                    id: ${PublicSubnet2}
+                private:
+                  private1:
+                    id: ${PrivateSubnet1}
+                  private2:
+                    id: ${PrivateSubnet2}
+            managedNodeGroups:
+              - name: nodegroup
+                amiFamily: ${EksMngAmiFamily}
+                instanceType: ${EksMngInstanceType}
+                desiredCapacity: ${EksMngDesiredCapacity}
+                privateNetworking: true
+                iam:
+                  attachPolicyARNs:
+                    - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+                    - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+                    - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+                    - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+            addons:
+              - name: coredns
+                resolveConflicts: overwrite
+              - name: kube-proxy
+                resolveConflicts: overwrite
+              - name: vpc-cni
+                resolveConflicts: overwrite
+              - name: eks-pod-identity-agent
+                resolveConflicts: overwrite
+              - name: metrics-server
+                resolveConflicts: overwrite
+            iam:
+              withOIDC: true # eksctl utils associate-iam-oidc-provider --cluster $CLUSTER_NAME --approve' > /home/ec2-user/eksctl/cluster.yaml
+
+            eksctl create cluster -f /home/ec2-user/eksctl/cluster.yaml
+
+            cd /home/ec2-user
+            git clone https://github.com/AWS-Skills/eks-deepdive.git
+            
+            mkdir -p /home/ec2-user/karpenter
+            mv /home/ec2-user/eks-deepdive/karpenter /home/ec2-user/
+            sed -i 's/export CLUSTER_NAME=""/export CLUSTER_NAME="${EksClusterName}"/g' /home/ec2-user/karpenter/00_install_karpenter.sh
+            sed -i 's/export AWS_REGION=""/export AWS_REGION="${AWS::Region}"/g' /home/ec2-user/karpenter/00_install_karpenter.sh
+            sed -i 's/role: KarpenterNodeRole-/role: KarpenterNodeRole-${EksClusterName}/g' /home/ec2-user/karpenter/01_nodepool.yaml
+            sed -i 's/aws:eks:cluster-name:/aws:eks:cluster-name: ${EksClusterName}/g' /home/ec2-user/karpenter/01_nodepool.yaml
+            chmod +x /home/ec2-user/karpenter/00_install_karpenter.sh
+            /home/ec2-user/karpenter/00_install_karpenter.sh
+
+            mkdir -p /home/ec2-user/lbc
+            mv /home/ec2-user/eks-deepdive/aws-load-balancer-controller/* /home/ec2-user/lbc/
+            sed -i 's/export CLUSTER_NAME=""/export CLUSTER_NAME="${EksClusterName}"/g' /home/ec2-user/lbc/00_install_lbc.sh
+            sed -i 's/export AWS_REGION=""/export AWS_REGION="${AWS::Region}"/g' /home/ec2-user/lbc/00_install_lbc.sh
+            chmod +x /home/ec2-user/lbc/00_install_lbc.sh
+            /home/ec2-user/lbc/00_install_lbc.sh
+
+            mkdir -p /home/ec2-user/argo-rollouts
+            mv /home/ec2-user/eks-deepdive/argo-rollouts /home/ec2-user/
+            sed -i 's/export AWS_REGION=""/export AWS_REGION="${AWS::Region}"/g' /home/ec2-user/argo-rollouts/00_install_argorollouts.sh
+            chmod +x /home/ec2-user/argo-rollouts/00_install_argorollouts.sh
+            /home/ec2-user/argo-rollouts/00_install_argorollouts.sh
+
+            CLUSTER_SG=$(aws eks describe-cluster --name ${EksClusterName} --query "cluster.resourcesVpcConfig.clusterSecurityGroupId" --output text)
+            TARGETGROUP_ARN=$(aws elbv2 create-target-group --name active-tg --protocol HTTP --port 80 --vpc-id ${Vpc} --target-type ip --query 'TargetGroups[0].TargetGroupArn' --output text)
+            ALB_ARN=$(aws elbv2 create-load-balancer --name alb --subnets ${PrivateSubnet1} ${PrivateSubnet2} --security-groups $CLUSTER_SG --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+            aws elbv2 create-listener --load-balancer-arn $ALB_ARN --protocol HTTP --port 80 --default-actions Type=forward,TargetGroupArn=$TARGETGROUP_ARN
+            sed -i "s|ALB_TARGETGROUP_ARN|$TARGETGROUP_ARN|g" /home/ec2-user/argo-rollouts/01_canary_rollouts.yaml
+
+            # kubectl apply -f /home/ec2-user/argo-rollouts/01_canary_rollouts.yaml
+
+            EOF
+
+Outputs:
+  CloudFrontDomainName:
+    Value: !Sub
+      - https://${domain}
+      - domain: !GetAtt CloudFrontDistribution.DomainName

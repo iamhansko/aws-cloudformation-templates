@@ -1,0 +1,326 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: VPC
+        Parameters:
+          - Prefix
+          - VpcCidrBlock
+          - EnableDnsHostnamesOption
+          - EnableDnsResolutionOption
+      - Label:
+          default: Subnets
+        Parameters:
+          - NumberOfPublicSubnets
+          - NumberOfPrivateSubnets
+
+Parameters:
+  Prefix:
+    Description: Name Tag Auto-generation ("project" -> project-vpc, project-igw, ...)
+    Type: String
+    Default: project
+    AllowedPattern: ".+"
+    ConstraintDescription: "Parameter [Prefix] must not be empty" 
+  VpcCidrBlock:
+    Description: CIDR Block for the VPC to Create (ex 10.0.0.0/16)
+    Type: String
+    Default: 10.0.0.0/16
+    AllowedPattern: '(([1-9]{0,1}[0-9]{0,2}|2[0-4][0-9]|25[0-5])\.){3}([1-9]{0,1}[0-9]{0,2}|2[0-4][0-9]|25[0-5])\/([1-2][0-9]|3[0-1])'
+    ConstraintDescription: "Parameter [VpcCidrBlock] is invalid"
+  NumberOfPublicSubnets:
+    Type: Number
+    Default: 2
+    MinValue: 0
+    MaxValue: 3
+    ConstraintDescription: "Parameter [NumberOfPublicSubnets] must not be empty"
+  NumberOfPrivateSubnets:
+    Description: NumberOfPublicSubnets >= NumberOfPrivateSubnets
+    Type: Number
+    Default: 2
+    MinValue: 0
+    MaxValue: 3
+    ConstraintDescription: "Parameter [NumberOfPrivateSubnets] must not be empty"
+  EnableDnsHostnamesOption:
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  EnableDnsResolutionOption:
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+
+Conditions:
+  CreatePublicSubnet1: !Not [!Equals [!Ref NumberOfPublicSubnets, 0]] # 1, 2, 3
+  CreatePublicSubnet2: !Or [!Equals [!Ref NumberOfPublicSubnets, 2], !Equals [!Ref NumberOfPublicSubnets, 3]] # 2, 3
+  CreatePublicSubnet3: !Equals [!Ref NumberOfPublicSubnets, 3] # 3
+  CreatePrivateSubnet1: !Not [!Equals [!Ref NumberOfPrivateSubnets, 0]] # 1, 2, 3
+  CreatePrivateSubnet2: !Or [!Equals [!Ref NumberOfPrivateSubnets, 2], !Equals [!Ref NumberOfPrivateSubnets, 3]] # 2, 3
+  CreatePrivateSubnet3: !Equals [!Ref NumberOfPrivateSubnets, 3] # 3
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidrBlock
+      EnableDnsSupport: !Ref EnableDnsResolutionOption
+      EnableDnsHostnames: !Ref EnableDnsHostnamesOption # for EC2 PublicDnsName, ...
+      Tags:
+        - Key: Name
+          Value: !Ref Prefix
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-igw"
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-rtb-public"
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # Public Subnet 1 (AZ a)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePublicSubnet1
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: !Select [0, !Cidr [!GetAtt Vpc.CidrBlock, 6, 8]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-subnet-public1-${AWS::Region}a"
+        - Key: kubernetes.io/role/elb
+          Value: 1
+      VpcId: !Ref Vpc
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePublicSubnet1
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet1
+  
+  # Public Subnet 2 (AZ b)
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePublicSubnet2
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}b
+      CidrBlock: !Select [1, !Cidr [!GetAtt Vpc.CidrBlock, 6, 8]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-subnet-public2-${AWS::Region}b"
+        - Key: kubernetes.io/role/elb
+          Value: 1
+      VpcId: !Ref Vpc
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePublicSubnet2
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet2
+  
+  # Public Subnet 3 (AZ c)
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePublicSubnet3
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}c
+      CidrBlock: !Select [2, !Cidr [!GetAtt Vpc.CidrBlock, 6, 8]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-subnet-public3-${AWS::Region}c"
+        - Key: kubernetes.io/role/elb
+          Value: 1
+      VpcId: !Ref Vpc
+  PublicSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePublicSubnet3
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet3
+  
+  # Private Subnet 1 (AZ a)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivateSubnet1
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: !Select [3, !Cidr [!GetAtt Vpc.CidrBlock, 6, 8]]
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-subnet-private1-${AWS::Region}a"
+        - Key: kubernetes.io/role/internal-elb
+          Value: 1
+      VpcId: !Ref Vpc
+  NatGateway1ElasticIp:
+    Type: AWS::EC2::EIP
+    Condition: CreatePrivateSubnet1
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Condition: CreatePrivateSubnet1
+    Properties:
+      AllocationId: !GetAtt NatGateway1ElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags: 
+        - Key : Name
+          Value : !Sub "${Prefix}-nat-public1-${AWS::Region}a"
+  PrivateSubnet1RouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreatePrivateSubnet1
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : !Sub "${Prefix}-rtb-private1-${AWS::Region}a"
+      VpcId: !Ref Vpc
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivateSubnet1
+    Properties:
+      RouteTableId: !Ref PrivateSubnet1RouteTable
+      SubnetId: !Ref PrivateSubnet1
+  PrivateSubnet1Route:
+    Type: AWS::EC2::Route
+    Condition: CreatePrivateSubnet1
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+      RouteTableId: !Ref PrivateSubnet1RouteTable
+  
+  # Private Subnet 2 (AZ b)
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivateSubnet2
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}b
+      CidrBlock: !Select [4, !Cidr [!GetAtt Vpc.CidrBlock, 6, 8]]
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-subnet-private2-${AWS::Region}b"
+        - Key: kubernetes.io/role/internal-elb
+          Value: 1
+      VpcId: !Ref Vpc
+  NatGateway2ElasticIp:
+    Type: AWS::EC2::EIP
+    Condition: CreatePrivateSubnet2
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Condition: CreatePrivateSubnet2
+    Properties:
+      AllocationId: !GetAtt NatGateway2ElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags: 
+        - Key : Name
+          Value : !Sub "${Prefix}-nat-public2-${AWS::Region}b"
+  PrivateSubnet2RouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreatePrivateSubnet2
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : !Sub "${Prefix}-rtb-private2-${AWS::Region}b"
+      VpcId: !Ref Vpc
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivateSubnet2
+    Properties:
+      RouteTableId: !Ref PrivateSubnet2RouteTable
+      SubnetId: !Ref PrivateSubnet2
+  PrivateSubnet2Route:
+    Type: AWS::EC2::Route
+    Condition: CreatePrivateSubnet2
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+      RouteTableId: !Ref PrivateSubnet2RouteTable
+  
+  # Private Subnet 3 (AZ c)
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivateSubnet3
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}c
+      CidrBlock: !Select [5, !Cidr [!GetAtt Vpc.CidrBlock, 6, 8]]
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-subnet-private3-${AWS::Region}c"
+        - Key: kubernetes.io/role/internal-elb
+          Value: 1
+      VpcId: !Ref Vpc
+  NatGateway3ElasticIp:
+    Type: AWS::EC2::EIP
+    Condition: CreatePrivateSubnet3
+  NatGateway3:
+    Type: AWS::EC2::NatGateway
+    Condition: CreatePrivateSubnet3
+    Properties:
+      AllocationId: !GetAtt NatGateway3ElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnet3
+      Tags: 
+        - Key : Name
+          Value : !Sub "${Prefix}-nat-public3-${AWS::Region}c"
+  PrivateSubnet3RouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreatePrivateSubnet3
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : !Sub "${Prefix}-rtb-private3-${AWS::Region}c"
+      VpcId: !Ref Vpc
+  PrivateSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivateSubnet3
+    Properties:
+      RouteTableId: !Ref PrivateSubnet3RouteTable
+      SubnetId: !Ref PrivateSubnet3
+  PrivateSubnet3Route:
+    Type: AWS::EC2::Route
+    Condition: CreatePrivateSubnet3
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway3
+      RouteTableId: !Ref PrivateSubnet3RouteTable
+
+Outputs:
+  VpcId: 
+    Value: !Ref Vpc
+  PublicSubnet1Id:
+    Condition: CreatePublicSubnet1
+    Value: !Ref PublicSubnet1
+  PublicSubnet2Id:
+    Condition: CreatePublicSubnet2
+    Value: !Ref PublicSubnet2
+  PublicSubnet3Id:
+    Condition: CreatePublicSubnet3
+    Value: !Ref PublicSubnet3
+  PrivateSubnet1Id:
+    Condition: CreatePrivateSubnet1
+    Value: !Ref PrivateSubnet1
+  PrivateSubnet2Id:
+    Condition: CreatePrivateSubnet2
+    Value: !Ref PrivateSubnet2
+  PrivateSubnet3Id:
+    Condition: CreatePrivateSubnet3
+    Value: !Ref PrivateSubnet3
