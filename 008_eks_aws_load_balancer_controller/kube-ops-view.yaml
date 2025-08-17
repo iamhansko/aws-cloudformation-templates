@@ -1,12 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "CloudFormation Template"
 
+Parameters:
+  AmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
 Mappings:
-  RegionMap:
-    us-east-1:
-      AmazonLinux2023: ami-0b72821e2f351e396
-    ap-northeast-2:
-      AmazonLinux2023: ami-04ea5b2d3c8ceccf8
   ResourceMap:
     Vpc:
       Name : stem-vpc
@@ -21,7 +20,7 @@ Mappings:
       Name: stem-natgw
     BastionEc2:
       Name: stem-bastion
-      InstanceType: t3.small #c5.large
+      InstanceType: t3.small
 
 Resources:
   KeyPair:
@@ -237,14 +236,13 @@ Resources:
   BastionEc2:
     Type: AWS::EC2::Instance
     DependsOn: 
-      - EksCluster
       - EksOidcProvider
     CreationPolicy:
       ResourceSignal:
         Count: '1'                
         Timeout: PT20M
     Properties:
-      ImageId: !FindInMap [RegionMap, !Ref AWS::Region, AmazonLinux2023]
+      ImageId: !Ref AmiId
       InstanceType: !FindInMap [ResourceMap, BastionEc2, InstanceType]
       KeyName: !Ref KeyPair
       NetworkInterfaces: 
@@ -253,6 +251,7 @@ Resources:
           SubnetId: !Ref PublicSubnetA
           GroupSet: 
             - !Ref BastionEc2SecurityGroup
+            - !GetAtt EksCluster.ClusterSecurityGroupId
       Tags: 
         - Key: Name
           Value: !FindInMap [ResourceMap, BastionEc2, Name]
@@ -262,7 +261,7 @@ Resources:
         Fn::Base64: 
           !Sub |
             #!/bin/bash
-            dnf update -y
+            dnf update -yq
 
             sudo -Eu ec2-user bash << 'EOF'
             cd /home/ec2-user
@@ -272,9 +271,9 @@ Resources:
             mv kubectl /home/ec2-user/bin/kubectl
             export PATH=/home/ec2-user/bin:$PATH
             echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
-            echo "alias k=kubectl" >>~/.bashrc
-            echo "complete -o default -F __start_kubectl k" >>~/.bashrc
-            echo "source <(kubectl completion bash)" >>~/.bashrc
+            echo "alias k=kubectl" >> ~/.bashrc
+            echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+            echo "source <(kubectl completion bash)" >> ~/.bashrc
             exec bash
             aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}
 
@@ -313,6 +312,7 @@ Resources:
             kubectl apply -k deploy
             kubectl patch svc kube-ops-view -p "{\"spec\": {\"type\": \"LoadBalancer\"}}"
             EOF
+
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
   BastionEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -386,7 +386,6 @@ Resources:
               - "shield:CreateProtection"
               - "shield:DeleteProtection"
             Resource: "*"
-      ManagedPolicyName: AWSLoadBalancerControllerIAMPolicy
 
   EksCluster:
     Type: AWS::EKS::Cluster
@@ -411,8 +410,6 @@ Resources:
         #   - !Sub
         #     - "${PublicIp}/32"
         #     - PublicIp: !GetAtt BastionEc2ElasticIP.PublicIp
-        SecurityGroupIds: 
-          - !Ref EksClusterSecurityGroup
         SubnetIds: 
           - !Ref PublicSubnetA
           - !Ref PublicSubnetB
@@ -421,18 +418,6 @@ Resources:
           - !Ref PrivateSubnetB
           - !Ref PrivateSubnetC
       RoleArn: !GetAtt EksClusterIamRole.Arn
-      # UpgradePolicy: 
-      #   SupportType: String
-      # Version: String
-      # KubernetesNetworkConfig: 
-      #   IpFamily: ipv4
-      #   ServiceIpv4Cidr: 10.0.0.0/16
-      #   ServiceIpv6Cidr: String
-      # EncryptionConfig: 
-      #   - Provider: 
-      #       KeyArn: String
-      #     Resources: 
-      #       - String
   AppNodeGroup:
     Type: AWS::EKS::Nodegroup
     Properties:
@@ -463,40 +448,12 @@ Resources:
       LaunchTemplateData: 
         KeyName: !Ref KeyPair
         SecurityGroupIds: 
-          - !Ref EksNodeSecurityGroup
+          - !GetAtt EksCluster.ClusterSecurityGroupId
         TagSpecifications: 
           - ResourceType: instance
             Tags: 
               - Key: Name
                 Value: app-nodegroup-instance
-  EksClusterSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group for EKS Cluster SSH Connection"
-      GroupName: eks-cluster-sg
-      SecurityGroupIngress: 
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: eks-cluster-sg
-  EksNodeSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group for EKS Cluster Node SSH Connection"
-      GroupName: eks-node-sg
-      SecurityGroupIngress: 
-        # - SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
-        #   FromPort: 22
-        #   IpProtocol: tcp
-        #   ToPort: 22
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: eks-node-sg
   EksClusterIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -527,6 +484,7 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
   EksClusterAccessEntry:
     # To manage your EKS Cluster using 'kubectl' commands inside a Bastion EC2 
     Type: AWS::EKS::AccessEntry
