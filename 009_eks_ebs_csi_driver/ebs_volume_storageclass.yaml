@@ -5,15 +5,13 @@ Parameters:
   KubernetesVersion:
     Description: EKS Cluster Kubernetes Version (1.XX)
     Type: String
-    Default: "1.31"
-    AllowedValues: ["1.24", "1.25", "1.26", "1.27", "1.28", "1.29", "1.30", "1.31", "1.32"]
+    Default: "1.33"
+    AllowedValues: ["1.31", "1.32", "1.33"]
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
 
 Mappings:
-  RegionMap:
-    us-east-1:
-      AmazonLinux2023: ami-0b72821e2f351e396
-    ap-northeast-2:
-      AmazonLinux2023: ami-04ea5b2d3c8ceccf8
   ResourceMap:
     Vpc:
       Name : stem-vpc
@@ -240,15 +238,14 @@ Resources:
 
   BastionEc2:
     Type: AWS::EC2::Instance
-    DependsOn: 
-      - EksCluster
+    DependsOn:
       - EbsCsiDriverAddon
     CreationPolicy:
       ResourceSignal:
         Count: '1'                
         Timeout: PT20M
     Properties:
-      ImageId: !FindInMap [RegionMap, !Ref AWS::Region, AmazonLinux2023]
+      ImageId: !Ref AmiId
       InstanceType: !FindInMap [ResourceMap, BastionEc2, InstanceType]
       KeyName: !Ref KeyPair
       NetworkInterfaces: 
@@ -257,6 +254,7 @@ Resources:
           SubnetId: !Ref PublicSubnetA
           GroupSet: 
             - !Ref BastionEc2SecurityGroup
+            - !GetAtt EksCluster.ClusterSecurityGroupId
       Tags: 
         - Key: Name
           Value: !FindInMap [ResourceMap, BastionEc2, Name]
@@ -266,7 +264,8 @@ Resources:
         Fn::Base64: 
           !Sub |
             #!/bin/bash
-            dnf update -y
+            dnf update -yq
+            dnf install -yq git
             sudo -Eu ec2-user bash << 'EOF'
             cd /home/ec2-user
             mkdir -p /home/ec2-user/bin
@@ -275,9 +274,9 @@ Resources:
             mv kubectl /home/ec2-user/bin/kubectl
             export PATH=/home/ec2-user/bin:$PATH
             echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
-            echo "alias k=kubectl" >>~/.bashrc
-            echo "complete -o default -F __start_kubectl k" >>~/.bashrc
-            echo "source <(kubectl completion bash)" >>~/.bashrc
+            echo "alias k=kubectl" >> ~/.bashrc
+            echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+            echo "source <(kubectl completion bash)" >> ~/.bashrc
             exec bash
             aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}
 
@@ -286,7 +285,6 @@ Resources:
             aws configure set region ${AWS::Region}
             # eksctl utils associate-iam-oidc-provider --cluster ${EksCluster} --approve --region ${AWS::Region}
 
-            sudo dnf install -y git
             curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
             chmod 700 /home/ec2-user/get_helm.sh
             /home/ec2-user/get_helm.sh
@@ -307,12 +305,7 @@ Resources:
             - matchLabelExpressions:
               - key: topology.kubernetes.io/zone
                 values:
-                - us-east-1a
-                - us-east-1b
-                - us-east-1c
-                - ap-northeast-2a
-                - ap-northeast-2b
-                - ap-northeast-2c' > /home/ec2-user/manifests/storageclass.yaml
+                - ${AWS::Region}a' > /home/ec2-user/manifests/storageclass.yaml
             echo 'apiVersion: apps/v1
             kind: Deployment
             metadata:
@@ -329,7 +322,7 @@ Resources:
                 spec:
                   containers:
                   - name: app
-                    image: centos
+                    image: public.ecr.aws/amazonlinux/amazonlinux
                     command: ["/bin/sh"]
                     args: ["-c", "while true; do echo $(date -u) >> /data/out.txt; sleep 5; done"]
                     volumeMounts:
@@ -412,8 +405,6 @@ Resources:
         #   - !Sub
         #     - "${PublicIp}/32"
         #     - PublicIp: !GetAtt BastionEc2ElasticIP.PublicIp
-        SecurityGroupIds: 
-          - !Ref EksClusterSecurityGroup
         SubnetIds: 
           - !Ref PublicSubnetA
           - !Ref PublicSubnetB
@@ -422,18 +413,6 @@ Resources:
           - !Ref PrivateSubnetB
           - !Ref PrivateSubnetC
       RoleArn: !GetAtt EksClusterIamRole.Arn
-      # UpgradePolicy: 
-      #   SupportType: String
-      # Version: String
-      # KubernetesNetworkConfig: 
-      #   IpFamily: ipv4
-      #   ServiceIpv4Cidr: 10.0.0.0/16
-      #   ServiceIpv6Cidr: String
-      # EncryptionConfig: 
-      #   - Provider: 
-      #       KeyArn: String
-      #     Resources: 
-      #       - String
   AppNodeGroup:
     Type: AWS::EKS::Nodegroup
     Properties:
@@ -464,40 +443,12 @@ Resources:
       LaunchTemplateData: 
         KeyName: !Ref KeyPair
         SecurityGroupIds: 
-          - !Ref EksNodeSecurityGroup
+          - !GetAtt EksCluster.ClusterSecurityGroupId
         TagSpecifications: 
           - ResourceType: instance
             Tags: 
               - Key: Name
                 Value: app-nodegroup-instance
-  EksClusterSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group for EKS Cluster SSH Connection"
-      GroupName: eks-cluster-sg
-      SecurityGroupIngress: 
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: eks-cluster-sg
-  EksNodeSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group for EKS Cluster Node SSH Connection"
-      GroupName: eks-node-sg
-      SecurityGroupIngress: 
-        # - SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
-        #   FromPort: 22
-        #   IpProtocol: tcp
-        #   ToPort: 22
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: eks-node-sg
   EksClusterIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -528,6 +479,7 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
   EksClusterAccessEntry:
     # To manage your EKS Cluster using 'kubectl' commands inside a Bastion EC2 
     Type: AWS::EKS::AccessEntry
@@ -558,7 +510,7 @@ Resources:
                 {
                     "Effect": "Allow",
                     "Principal": {
-                        "Federated": "${OidcProviderArn}"
+                        "Federated": "${EksOidcProvider.Arn}"
                     },
                     "Action": "sts:AssumeRoleWithWebIdentity",
                     "Condition": {
@@ -570,8 +522,7 @@ Resources:
                 }
             ]
           }
-        - OidcProviderArn: !GetAtt EksOidcProvider.Arn
-          OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
   EbsCsiDriverAddon:
@@ -581,8 +532,6 @@ Resources:
       AddonVersion: v1.36.0-eksbuild.1
       ClusterName: !Ref EksCluster
       ServiceAccountRoleArn: !GetAtt EbsCsiDriverAddonIamRole.Arn
-  
-
 
 
 
