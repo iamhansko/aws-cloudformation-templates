@@ -5,15 +5,12 @@ Parameters:
   KubernetesVersion:
     Description: EKS Cluster Kubernetes Version (1.XX)
     Type: String
-    Default: "1.31"
-    AllowedValues: ["1.24", "1.25", "1.26", "1.27", "1.28", "1.29", "1.30", "1.31", "1.32"]
-
+    Default: "1.33"
+    AllowedValues: ["1.31", "1.32", "1.33"]
+  AmazonLinux2023AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
 Mappings:
-  RegionMap:
-    us-east-1:
-      AmazonLinux2023: ami-0b72821e2f351e396
-    ap-northeast-2:
-      AmazonLinux2023: ami-04ea5b2d3c8ceccf8
   ResourceMap:
     Vpc:
       Name : stem-vpc
@@ -240,14 +237,12 @@ Resources:
 
   BastionEc2:
     Type: AWS::EC2::Instance
-    DependsOn: 
-      - EksCluster
     CreationPolicy:
       ResourceSignal:
         Count: '1'                
         Timeout: PT20M
     Properties:
-      ImageId: !FindInMap [RegionMap, !Ref AWS::Region, AmazonLinux2023]
+      ImageId: !Ref AmazonLinux2023AmiId
       InstanceType: !FindInMap [ResourceMap, BastionEc2, InstanceType]
       KeyName: !Ref KeyPair
       NetworkInterfaces: 
@@ -256,6 +251,7 @@ Resources:
           SubnetId: !Ref PublicSubnetA
           GroupSet: 
             - !Ref BastionEc2SecurityGroup
+            - !GetAtt EksCluster.ClusterSecurityGroupId
       Tags: 
         - Key: Name
           Value: !FindInMap [ResourceMap, BastionEc2, Name]
@@ -268,12 +264,14 @@ Resources:
             dnf update -y
             dnf install -y git
             dnf groupinstall -y "Development Tools"
-            dnf install -y python3.12
-            dnf install -y python3-pip
-            ln -s /usr/bin/python3.12 /usr/bin/python
-            wget https://github.com/coder/code-server/releases/download/v4.93.1/code-server-4.93.1-linux-amd64.tar.gz
-            tar -xzf code-server-4.93.1-linux-amd64.tar.gz
-            mv code-server-4.93.1-linux-amd64 /usr/local/lib/code-server
+            dnf install -yq python3.13
+            ln -sf /usr/bin/python3.13 /usr/bin/python
+            python -m ensurepip --upgrade
+
+            export VSC_VERSION="4.102.3"
+            wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+            tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+            mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
             ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
             mkdir -p /home/ec2-user/.config/code-server
             cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
@@ -306,15 +304,14 @@ Resources:
             mv kubectl /home/ec2-user/bin/kubectl
             export PATH=/home/ec2-user/bin:$PATH
             echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
-            echo "alias k=kubectl" >>~/.bashrc
-            echo "complete -o default -F __start_kubectl k" >>~/.bashrc
-            echo "source <(kubectl completion bash)" >>~/.bashrc
+            echo "alias k=kubectl" >> ~/.bashrc
+            echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+            echo "source <(kubectl completion bash)" >> ~/.bashrc
             exec bash
             aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}
 
             curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
             sudo mv /tmp/eksctl /usr/local/bin
-            aws configure set region ${AWS::Region}
 
             curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
             chmod 700 /home/ec2-user/get_helm.sh
@@ -384,8 +381,6 @@ Resources:
         #   - !Sub
         #     - "${PublicIp}/32"
         #     - PublicIp: !GetAtt BastionEc2ElasticIP.PublicIp
-        SecurityGroupIds: 
-          - !Ref EksClusterSecurityGroup
         SubnetIds: 
           - !Ref PublicSubnetA
           - !Ref PublicSubnetB
@@ -394,25 +389,13 @@ Resources:
           - !Ref PrivateSubnetB
           - !Ref PrivateSubnetC
       RoleArn: !GetAtt EksClusterIamRole.Arn
-      # UpgradePolicy: 
-      #   SupportType: String
-      # Version: String
-      # KubernetesNetworkConfig: 
-      #   IpFamily: ipv4
-      #   ServiceIpv4Cidr: 10.0.0.0/16
-      #   ServiceIpv6Cidr: String
-      # EncryptionConfig: 
-      #   - Provider: 
-      #       KeyArn: String
-      #     Resources: 
-      #       - String
   AppNodeGroup:
     Type: AWS::EKS::Nodegroup
     Properties:
       NodegroupName: stem-app
       AmiType: AL2023_x86_64_STANDARD
       InstanceTypes: 
-        - t3.medium #c5.large
+        - t3.medium
       CapacityType: ON_DEMAND
       ClusterName: !Ref EksCluster
       ForceUpdateEnabled: true
@@ -436,40 +419,12 @@ Resources:
       LaunchTemplateData: 
         KeyName: !Ref KeyPair
         SecurityGroupIds: 
-          - !Ref EksNodeSecurityGroup
+          - !GetAtt EksCluster.ClusterSecurityGroupId
         TagSpecifications: 
           - ResourceType: instance
             Tags: 
               - Key: Name
                 Value: app-nodegroup-instance
-  EksClusterSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group for EKS Cluster SSH Connection"
-      GroupName: eks-cluster-sg
-      SecurityGroupIngress: 
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: eks-cluster-sg
-  EksNodeSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group for EKS Cluster Node SSH Connection"
-      GroupName: eks-node-sg
-      SecurityGroupIngress: 
-        # - SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
-        #   FromPort: 22
-        #   IpProtocol: tcp
-        #   ToPort: 22
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: eks-node-sg
   EksClusterIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -500,6 +455,7 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
   EksClusterAccessEntry:
     # To manage your EKS Cluster using 'kubectl' commands inside a Bastion EC2 
     Type: AWS::EKS::AccessEntry
@@ -513,6 +469,6 @@ Resources:
       Type: STANDARD
 
 Outputs:
-  BastionEc2PublicIP:
+  VsCode:
     Description: "Public IP Address of the VS Code Server EC2 instance"
     Value: !Sub "http://${BastionEc2.PublicIp}:8000"
