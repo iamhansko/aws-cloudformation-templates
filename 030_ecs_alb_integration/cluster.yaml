@@ -338,8 +338,8 @@ Resources:
             su - ec2-user << EOF
             cd /home/ec2-user
             aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
-            git clone https://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@github.com/AWS-Skills/2025-korea-practice.git
-            mv 2025-korea-practice/충북2과제/src/* /home/ec2-user/
+            git clone https://github.com/iamhansko/aws-cloudformation-templates.git
+            mv aws-cloudformation-templates/030_ecs_alb_integration/src/* /home/ec2-user/
 
             echo 'FROM python:3.13-slim
             WORKDIR /app
