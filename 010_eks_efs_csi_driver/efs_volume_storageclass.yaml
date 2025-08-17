@@ -5,8 +5,8 @@ Parameters:
   KubernetesVersion:
     Description: EKS Cluster Kubernetes Version (1.XX)
     Type: String
-    Default: "1.31"
-    AllowedValues: ["1.24", "1.25", "1.26", "1.27", "1.28", "1.29", "1.30", "1.31", "1.32"]
+    Default: "1.33"
+    AllowedValues: ["1.31", "1.32", "1.33"]
 
 Mappings:
   RegionMap:
@@ -240,8 +240,6 @@ Resources:
 
   BastionEc2:
     Type: AWS::EC2::Instance
-    DependsOn: 
-      - EksCluster
     CreationPolicy:
       ResourceSignal:
         Count: '1'                
@@ -256,6 +254,7 @@ Resources:
           SubnetId: !Ref PublicSubnetA
           GroupSet: 
             - !Ref BastionEc2SecurityGroup
+            - !GetAtt EksCluster.ClusterSecurityGroupId
       Tags: 
         - Key: Name
           Value: !FindInMap [ResourceMap, BastionEc2, Name]
@@ -265,7 +264,7 @@ Resources:
         Fn::Base64: 
           !Sub |
             #!/bin/bash
-            dnf update -y
+            dnf update -yq
             sudo -Eu ec2-user bash << 'EOF'
             cd /home/ec2-user
             mkdir -p /home/ec2-user/bin
@@ -274,9 +273,9 @@ Resources:
             mv kubectl /home/ec2-user/bin/kubectl
             export PATH=/home/ec2-user/bin:$PATH
             echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
-            echo "alias k=kubectl" >>~/.bashrc
-            echo "complete -o default -F __start_kubectl k" >>~/.bashrc
-            echo "source <(kubectl completion bash)" >>~/.bashrc
+            echo "alias k=kubectl" >> ~/.bashrc
+            echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+            echo "source <(kubectl completion bash)" >> ~/.bashrc
             exec bash
             aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}
 
@@ -285,10 +284,59 @@ Resources:
             aws configure set region ${AWS::Region}
             # eksctl utils associate-iam-oidc-provider --cluster ${EksCluster} --approve --region ${AWS::Region}
 
-            sudo dnf install -y git
             curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
             chmod 700 /home/ec2-user/get_helm.sh
             /home/ec2-user/get_helm.sh
+
+            mkdir -p /home/ec2-user/manifests
+            echo 'apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: efs
+            spec:
+              replicas: 2
+              selector:
+                matchLabels:
+                  app: efs
+              template:
+                metadata:
+                  labels:
+                    app: efs
+                spec:
+                  containers:
+                  - name: app
+                    image: rockylinux:8
+                    command: ["/bin/sh"]
+                    args: ["-c", "while true; do echo $(date -u) >> /data/out; sleep 5; done"]
+                    volumeMounts:
+                    - name: persistent-storage
+                      mountPath: /data
+                  volumes:
+                  - name: persistent-storage
+                    persistentVolumeClaim:
+                      claimName: efs-claim
+            ---
+            apiVersion: v1
+            kind: PersistentVolumeClaim
+            metadata:
+              name: efs-claim
+            spec:
+              accessModes:
+                - ReadWriteMany
+              storageClassName: efs-sc
+              resources:
+                requests:
+                  storage: 5Gi' > /home/ec2-user/manifests/deployment.yaml
+            echo 'kind: StorageClass
+            apiVersion: storage.k8s.io/v1
+            metadata:
+              name: efs-sc
+            provisioner: efs.csi.aws.com
+            parameters:
+              provisioningMode: efs-ap
+              fileSystemId: ${EfsFileSystem}
+              directoryPerms: "700"' > /home/ec2-user/manifests/storageclass.yaml
+
             EOF
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
   BastionEc2SecurityGroup:
@@ -351,8 +399,6 @@ Resources:
         #   - !Sub
         #     - "${PublicIp}/32"
         #     - PublicIp: !GetAtt BastionEc2ElasticIP.PublicIp
-        SecurityGroupIds: 
-          - !Ref EksClusterSecurityGroup
         SubnetIds: 
           - !Ref PublicSubnetA
           - !Ref PublicSubnetB
@@ -361,25 +407,13 @@ Resources:
           - !Ref PrivateSubnetB
           - !Ref PrivateSubnetC
       RoleArn: !GetAtt EksClusterIamRole.Arn
-      # UpgradePolicy: 
-      #   SupportType: String
-      # Version: String
-      # KubernetesNetworkConfig: 
-      #   IpFamily: ipv4
-      #   ServiceIpv4Cidr: 10.0.0.0/16
-      #   ServiceIpv6Cidr: String
-      # EncryptionConfig: 
-      #   - Provider: 
-      #       KeyArn: String
-      #     Resources: 
-      #       - String
   AppNodeGroup:
     Type: AWS::EKS::Nodegroup
     Properties:
       NodegroupName: stem-app
       AmiType: AL2023_x86_64_STANDARD
       InstanceTypes: 
-        - t3.medium #c5.large
+        - t3.medium
       CapacityType: ON_DEMAND
       ClusterName: !Ref EksCluster
       ForceUpdateEnabled: true
@@ -403,40 +437,12 @@ Resources:
       LaunchTemplateData: 
         KeyName: !Ref KeyPair
         SecurityGroupIds: 
-          - !Ref EksNodeSecurityGroup
+          - !GetAtt EksCluster.ClusterSecurityGroupId
         TagSpecifications: 
           - ResourceType: instance
             Tags: 
               - Key: Name
                 Value: app-nodegroup-instance
-  EksClusterSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group for EKS Cluster SSH Connection"
-      GroupName: eks-cluster-sg
-      SecurityGroupIngress: 
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: eks-cluster-sg
-  EksNodeSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group for EKS Cluster Node SSH Connection"
-      GroupName: eks-node-sg
-      SecurityGroupIngress: 
-        # - SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
-        #   FromPort: 22
-        #   IpProtocol: tcp
-        #   ToPort: 22
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: eks-node-sg
   EksClusterIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -468,6 +474,7 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       RoleName: EksNodeIamRole
   EksClusterAccessEntry:
     # To manage your EKS Cluster using 'kubectl' commands inside a Bastion EC2 
@@ -480,3 +487,84 @@ Resources:
       ClusterName: !Ref EksCluster
       PrincipalArn: !GetAtt BastionEc2IamRole.Arn
       Type: STANDARD
+  
+  EksOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList: 
+        - sts.amazonaws.com
+  EfsCsiDriverAddonIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # https://docs.aws.amazon.com/ko_kr/eks/latest/userguide/efs-csi.html
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Federated": "${EksOidcProvider.Arn}"
+                    },
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                        "StringEquals": {
+                            "${OidcProvider}:sub": "system:serviceaccount:kube-system:efs-csi-controller-sa",
+                            "${OidcProvider}:aud": "sts.amazonaws.com"
+                        }
+                    }
+                }
+            ]
+          }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonEFSCSIDriverPolicy
+  EfsCsiDriverAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: aws-efs-csi-driver
+      ClusterName: !Ref EksCluster
+      ServiceAccountRoleArn: !GetAtt EfsCsiDriverAddonIamRole.Arn
+  
+  EfsFileSystem:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Delete
+    Properties:
+      PerformanceMode: generalPurpose
+  EfsMountTargetPrivateSubnetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SecurityGroups: 
+        - !GetAtt EfsSecurityGroup.GroupId
+      SubnetId: !Ref PrivateSubnetA
+  EfsMountTargetPrivateSubnetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SecurityGroups: 
+        - !GetAtt EfsSecurityGroup.GroupId
+      SubnetId: !Ref PrivateSubnetB
+  EfsMountTargetPrivateSubnetC:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SecurityGroups: 
+        - !GetAtt EfsSecurityGroup.GroupId
+      SubnetId: !Ref PrivateSubnetC
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: efs-sg
+      SecurityGroupIngress: 
+        - FromPort: 2049
+          ToPort: 2049
+          IpProtocol: tcp
+          CidrIp: !GetAtt Vpc.CidrBlock
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: efs-sg
