@@ -1,0 +1,467 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Message Queue (ap-southeast-1)
+
+Parameters:
+  Al2023AmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.102.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: queue-vpc
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      AvailabilityZone: !Sub ${AWS::Region}a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: queue-pub-a
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: queue-igw
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Igw
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: queue-pub-rt
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT5M
+    Properties:
+      InstanceType: t3.small
+      KeyName: !Ref KeyPair
+      SubnetId: !Ref PublicSubnetA
+      ImageId: !Ref Al2023AmiId
+      IamInstanceProfile: !Ref BastionInstanceProfile
+      SecurityGroupIds: [ !Ref BastionEc2SecurityGroup ]
+      Tags:
+        - Key: Name
+          Value: queue-bastion
+      MetadataOptions:
+        # IMDSv2 or IMDSv1
+        HttpTokens: optional
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            dnf update -y
+            dnf groupinstall -y "Development Tools"
+            dnf install -y python3.13
+            ln -s /usr/bin/python3.13 /usr/bin/python3
+
+            wget https://github.com/coder/code-server/releases/download/v4.100.3/code-server-4.100.3-linux-amd64.tar.gz
+            tar -xzf code-server-4.100.3-linux-amd64.tar.gz
+            mv code-server-4.100.3-linux-amd64 /usr/local/lib/code-server
+            ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+
+            mkdir -p /home/ec2-user/.config/code-server
+            cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+            bind-addr: 0.0.0.0:8000
+            auth: none
+            cert: false
+            EOF
+            chown -R ec2-user:ec2-user /home/ec2-user/.config
+            
+            cat <<EOF > /etc/systemd/system/code-server.service
+            [Unit]
+            Description=VS Code Server
+            After=network.target
+            [Service]
+            Type=simple
+            User=ec2-user
+            ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+            Restart=always
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl daemon-reload
+            systemctl enable code-server
+            systemctl start code-server
+
+            python3 -m ensurepip --upgrade
+            python3 -m pip install aiohttp boto3 requests
+
+            echo 'import asyncio
+            import aiohttp
+            import time
+            import boto3
+            import requests
+            from botocore.exceptions import ClientError
+
+            # 설정
+            LAMBDA_FUNCTION_NAME = "queue-lambda"  # Lambda 함수 이름
+            TOTAL_REQUESTS = 20000
+            CONCURRENCY = 200
+            BATCH_SIZE = 200
+
+            # 리전 자동 감지 (EC2 인스턴스 메타데이터 활용)
+            def get_region_from_metadata():
+                try:
+                    response = requests.get(
+                        "http://169.254.169.254/latest/dynamic/instance-identity/document",
+                        timeout=1
+                    )
+                    return response.json().get("region")
+                except Exception as e:
+                    raise RuntimeError(f"리전 메타데이터 조회 실패: {e}")
+
+            # 세션 및 클라이언트 생성
+            AWS_REGION = get_region_from_metadata()
+            session = boto3.session.Session(region_name=AWS_REGION)
+            lambda_client = session.client("lambda")
+
+            # Lambda Function URL 가져오기
+            def get_lambda_function_url():
+                try:
+                    response = lambda_client.get_function_url_config(FunctionName=LAMBDA_FUNCTION_NAME)
+                    return response["FunctionUrl"]
+                except ClientError as e:
+                    print(f"[Lambda URL 가져오기 실패] {e}")
+                    return None
+
+            # Lambda로 비동기 POST 요청 보내기
+            async def send_post(session, i, target_url):
+                data = {"message": f"Hello from request {i}"}
+                headers = {"Content-Type": "application/json"}
+
+                try:
+                    async with session.post(target_url, json=data, headers=headers) as response:
+                        if response.status == 200:
+                            return True
+                        else:
+                            print(f"요청 {i} 실패: 상태 코드 {response.status}")
+                            return False
+                except Exception as e:
+                    print(f"요청 {i} 예외 발생: {e}")
+                    return False
+                finally:
+                    await asyncio.sleep(0.005)  # 요청 간 딜레이
+
+            # 메인 비동기 루프
+            async def main():
+                target_url = get_lambda_function_url()
+                if not target_url:
+                    print("❌ Lambda Function URL을 가져올 수 없습니다.")
+                    return
+
+                connector = aiohttp.TCPConnector(limit=CONCURRENCY)
+                timeout = aiohttp.ClientTimeout(total=60)
+                success_count = 0
+
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    for batch_start in range(0, TOTAL_REQUESTS, BATCH_SIZE):
+                        batch_end = min(batch_start + BATCH_SIZE, TOTAL_REQUESTS)
+                        tasks = [send_post(session, i, target_url) for i in range(batch_start, batch_end)]
+                        results = await asyncio.gather(*tasks)
+                        batch_success = results.count(True)
+                        success_count += batch_success
+                        print(f"{batch_start} ~ {batch_end} 요청 중 성공: {batch_success}")
+                        await asyncio.sleep(1)  # 배치 간 짧은 대기
+
+                print(f"총 성공 요청 수: {success_count} / {TOTAL_REQUESTS}")
+
+            # 실행
+            if __name__ == "__main__":
+                start = time.time()
+                asyncio.run(main())
+                print(f"총 소요 시간: {time.time() - start:.2f}초")
+            ' > /home/ec2-user/message-app.py
+            chown ec2-user:ec2-user /home/ec2-user/message-app.py
+
+            timedatectl set-timezone Asia/Seoul
+
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionElasticIp:
+    Type: AWS::EC2::EIP
+  BastionElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt BastionElasticIp.AllocationId
+      InstanceId: !Ref BastionEc2
+  BastionEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: Security Group
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2222
+          ToPort: 2222
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: bastion-ec2-sg
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: BastionEc2Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  BastionInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref BastionEc2IamRole
+  
+  QueueEc2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      SubnetId: !Ref PublicSubnetA
+      ImageId: !Ref Al2023AmiId
+      IamInstanceProfile: !Ref QueueInstanceProfile
+      SecurityGroupIds: [ !Ref QueueEc2SecurityGroup ]
+      Tags:
+        - Key: Name
+          Value: queue-ec2
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            dnf update -y
+            dnf groupinstall -y "Development Tools"
+            dnf install -y python3.13
+            ln -s /usr/bin/python3.13 /usr/bin/python3
+
+            dnf install -y amazon-cloudwatch-agent
+            echo '{
+              "agent": {
+                "run_as_user": "root"
+              },
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/Gwangju_queue.log",
+                        "log_group_name": "queue-log-group",
+                        "log_stream_name": "{instance_id}"
+                      }
+                    ]
+                  }
+                }
+              }
+            }' > /opt/aws/amazon-cloudwatch-agent/bin/config.json
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json
+
+            python3 -m ensurepip --upgrade
+            python3 -m pip install boto3
+
+            cat > /home/ec2-user/worker.py << EOF
+            import boto3
+            import concurrent.futures
+            import logging
+            queue_url = "${SqsQueue}"
+            log_file = "/var/log/Gwangju_queue.log"
+            logging.basicConfig(filename=log_file, format="%(asctime)s %(message)s")
+            sqs = boto3.client("sqs", region_name="${AWS::Region}")
+            def worker(message):
+              try:
+                logging.info("처리성공")
+                sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=message["ReceiptHandle"])
+              except Exception as e:
+                logging.error(e)
+            def sqs_process(max_workers=10, wait_time=10, max_messages=10):
+              with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                while True:
+                  response = sqs.receive_message(
+                    QueueUrl=queue_url,
+                    MaxNumberOfMessages=max_messages, # max 10
+                    WaitTimeSeconds=wait_time, # max 20
+                    VisibilityTimeout=30
+                  )
+                  if "Messages" in response:
+                    messages = response["Messages"]
+                    futures = [executor.submit(worker, message) for message in messages]
+                    concurrent.futures.wait(futures)
+            if __name__ == "__main__":
+              sqs_process(max_workers=200, wait_time=5, max_messages=10)
+            EOF
+            chown ec2-user:ec2-user /home/ec2-user/worker.py
+            touch /var/log/Gwangju_queue.log
+            chown ec2-user:ec2-user /var/log/Gwangju_queue.log
+            
+            # python3 /home/ec2-user/worker.py
+
+            timedatectl set-timezone Asia/Seoul
+
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource QueueEc2 --region ${AWS::Region}
+  QueueEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: Security Group
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: queue-ec2-sg
+  QueueEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: QueueEc2Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  QueueInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref BastionEc2IamRole
+
+  SqsQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Delete
+    Properties:
+      QueueName: queue
+      MessageRetentionPeriod: 3600
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: queue-lambda
+      Runtime: python3.13
+      Role: !GetAtt LambdaRole.Arn
+      Handler: index.lambda_handler
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import boto3
+
+          sqs = boto3.client('sqs')
+          QUEUE_URL = os.environ['QUEUE_URL']
+
+          def lambda_handler(event, context):
+            body = json.loads(event["body"])
+            sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=body["message"])
+            return {"statusCode": 200, "body": "Success"}
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref SqsQueue
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: queue-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: [lambda.amazonaws.com] }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt SqsQueue.Arn
+  LambdaUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !Ref LambdaFunction
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+          
+  CloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: queue-log-group
+  CloudWatchMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      FilterName: queue-filter
+      FilterPattern: "\"처리성공\""
+      LogGroupName: !Ref CloudWatchLogGroup
+      ApplyOnTransformedLogs: False
+      MetricTransformations: 
+        - MetricName: "queue-metric"
+          MetricNamespace: "queue"
+          MetricValue: "1"
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${BastionElasticIp}:8000
+    Description: VsCode on BastionEC2
+  KeyPairValue:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/systems-manager/parameters/%252Fec2%252Fkeypair%252F${KeyPair.KeyPairId}
+    Description: KeyPair Value

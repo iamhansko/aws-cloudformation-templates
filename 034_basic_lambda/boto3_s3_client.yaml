@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Storage Data Project (ap-northeast-2)
+
+Parameters:
+  RandomString:
+    Type: String
+    MinLength: 4
+    MaxLength: 4
+    AllowedPattern: '[a-z]{4}'
+    Description: Random 4 Characters (a-z)
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - LambdaInvokePermission
+    Properties:
+      BucketName: !Sub sensitive-${RandomString}
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration:
+        LambdaConfigurations: 
+          - Event: s3:ObjectCreated:*
+            Filter: 
+              S3Key: 
+                Rules: 
+                  - Name: prefix
+                    Value: incoming
+            Function: !GetAtt LambdaFunction.Arn
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: masking-start
+      Runtime: python3.13
+      Role: !GetAtt LambdaIamRole.Arn
+      Handler: index.lambda_handler
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import boto3
+          import re
+          import os
+          import json
+
+          s3 = boto3.client('s3')
+
+          def mask_name(text):
+              parts = text.split()
+              if len(parts) > 1 and not any('*' in p for p in parts):
+                  return text.replace(parts[-1], '*'*len(parts[-1]))
+              return text
+
+          def mask_email(text):
+              pattern = re.compile(r'\b([\w\.]+)(@[\w\.-]+\.\w+)\b')
+              def replacer(match):
+                  if '*' in match.group(1):
+                      return match.group(0)
+                  name_part = match.group(1)
+                  if len(name_part) > 1:
+                      return f"{name_part[0]}{'*'*(len(name_part)-1)}{match.group(2)}"
+                  else:
+                      return match.group(0)
+              return pattern.sub(replacer, text)
+
+          def mask_phone(text):
+              pattern = re.compile(r'(\b\d{3}-\d{4})-(?!\*{4})\d{4}\b')
+              return pattern.sub(r'\1-****', text)
+
+          def mask_ssn(text):
+              pattern = re.compile(r'(\b\d{3}-\d{2})-(?!\*{4})\d{4}\b')
+              return pattern.sub(r'\1-****', text)
+
+          def mask_card(text):
+              pattern = re.compile(r'(\b\d{4}-\d{4}-\d{4}-)(\d{4}\b)')
+              def replacer(match):
+                  if '****' in match.group(0):
+                      return match.group(0)
+                  return f"{match.group(1)}****"
+              return pattern.sub(replacer, text)
+
+          def mask_uuid(text):
+              pattern = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-)(?!\*{12})[0-9a-f]{12}', re.IGNORECASE)
+              return pattern.sub(r'\1************', text)
+
+          def lambda_handler(event, context):
+              try:
+                  print(f"Received event: {json.dumps(event)}")
+                  bucket_name = event['Records'][0]['s3']['bucket']['name']
+                  object_key = event['Records'][0]['s3']['object']['key']
+                  obj = s3.get_object(Bucket=bucket_name, Key=object_key)
+                  body = obj['Body'].read().decode('utf-8')
+                  if not object_key.startswith('incoming/'):
+                      return {'status': 'Skipped'}
+                  masked_key = object_key.replace('incoming/', 'masked/', 1)
+                  obj = s3.get_object(Bucket=bucket_name, Key=object_key)
+                  body = obj['Body'].read().decode('utf-8')
+                  masked_lines = []
+                  for line in body.splitlines():
+                      line = mask_card(line)
+                      line = mask_ssn(line)
+                      line = mask_phone(line)
+                      line = mask_email(line)
+                      line = mask_name(line)
+                      line = mask_uuid(line)
+                      masked_lines.append(line)
+                  masked_body = '\n'.join(masked_lines)
+                  s3.put_object(Bucket=bucket_name, Key=masked_key, Body=masked_body.encode('utf-8'))
+                  return {'status': 'Success'}
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  raise
+  LambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:aws:s3:::sensitive-${RandomString}
+      SourceAccount: !Ref AWS::AccountId

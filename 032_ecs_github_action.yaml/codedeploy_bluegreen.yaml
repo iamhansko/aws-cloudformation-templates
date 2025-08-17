@@ -1,0 +1,883 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CI/CD (ap-northeast-2)
+
+Parameters:
+  # "ecs-app" Branch push/commit -> ECS Blue/Green Deployment (EC2/Fargate)
+  GitHubToken:
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubToken] must not be empty
+  GitHubUser:
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubUser] must not be empty
+  GitHubRepo:
+    Type: String
+    Default: ecs-repo
+  GitHubBranch:
+    Type: String
+    Default: ecs-app
+  GitHubAction:
+    Type: String
+    Default: ecs-cicd-action
+  CodeBuildProjectName:
+    Type: String
+    Default: GitHubRunner
+  BastionEc2AmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+  EcsAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.100.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: ecs-cicd-vpc
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      AvailabilityZone: !Sub ${AWS::Region}a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ecs-cicd-public-a
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      AvailabilityZone: !Sub ${AWS::Region}b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ecs-cicd-public-b
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [2, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Tags:
+        - Key: Name
+          Value: ecs-cicd-private-a
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [3, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      AvailabilityZone: !Sub ${AWS::Region}b
+      Tags:
+        - Key: Name
+          Value: ecs-cicd-private-b
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: ecs-cicd-igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: ecs-cicd-public-rt
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicSubnetRouteTable
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  PrivateSubnetARouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: ecs-cicd-private-a-rt
+  NatgatewayAElasticIp:
+    Type: AWS::EC2::EIP
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatgatewayAElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags: 
+        - Key : Name
+          Value : ecs-cicd-natgw-a
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateSubnetARouteTable
+      SubnetId: !Ref PrivateSubnetA
+  PrivateSubnetARoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+      RouteTableId: !Ref PrivateSubnetARouteTable
+
+  PrivateSubnetBRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: ecs-cicd-private-b-rt
+  NatgatewayBElasticIp:
+    Type: AWS::EC2::EIP
+  NatGatewayB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatgatewayBElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnetB
+      Tags: 
+        - Key : Name
+          Value : ecs-cicd-natgw-b
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateSubnetBRouteTable
+      SubnetId: !Ref PrivateSubnetB
+  PrivateSubnetBRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayB
+      RouteTableId: !Ref PrivateSubnetBRouteTable
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT5M
+    Properties:
+      InstanceType: t3.small
+      ImageId: !Ref BastionEc2AmiId
+      KeyName: !Ref KeyPair
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnetA
+          GroupSet: 
+            - !Ref BastionEc2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: ecs-cicd-bastion
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            dnf update -y
+            dnf groupinstall -y "Development Tools"
+            dnf install -y python3.12
+            dnf install -y python3-pip
+            ln -s /usr/bin/python3.12 /usr/bin/python
+
+            wget https://github.com/coder/code-server/releases/download/v4.100.3/code-server-4.100.3-linux-amd64.tar.gz
+            tar -xzf code-server-4.100.3-linux-amd64.tar.gz
+            mv code-server-4.100.3-linux-amd64 /usr/local/lib/code-server
+            ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+
+            mkdir -p /home/ec2-user/.config/code-server
+            cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+            bind-addr: 0.0.0.0:8000
+            auth: none
+            cert: false
+            EOF
+            chown -R ec2-user:ec2-user /home/ec2-user/.config
+            
+            cat <<EOF > /etc/systemd/system/code-server.service
+            [Unit]
+            Description=VS Code Server
+            After=network.target
+            [Service]
+            Type=simple
+            User=ec2-user
+            ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+            Restart=always
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl daemon-reload
+            systemctl enable code-server
+            systemctl start code-server
+
+            sed -i 's/#Port 22/Port 2222/' /etc/ssh/sshd_config
+            sudo systemctl restart sshd
+            # ssh -i key.pem -p 10100 ec2-user@public_ip
+
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionElasticIp:
+    Type: AWS::EC2::EIP
+  BastionElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt BastionElasticIp.AllocationId
+      InstanceId: !Ref BastionEc2
+  BastionEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2222
+          ToPort: 2222
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: bastion-ec2-sg
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: bastion-ec2-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref BastionEc2IamRole
+
+  Ecr:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ecs-cicd-ecr
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: ecs-cicd-cluster
+      ClusterSettings: 
+        - Name: containerInsights
+          Value: enhanced
+  EcsEc2CapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      # Name: ec2-capacity-provider
+      AutoScalingGroupProvider: 
+        AutoScalingGroupArn: !GetAtt EcsAsg.AutoScalingGroupARN
+        ManagedDraining: ENABLED
+        ManagedScaling: 
+          InstanceWarmupPeriod: 30
+          MaximumScalingStepSize: 10000
+          MinimumScalingStepSize: 1
+          Status: ENABLED
+          TargetCapacity: 100
+        ManagedTerminationProtection: DISABLED
+  EcsEc2CapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      CapacityProviders: 
+        - !Ref EcsEc2CapacityProvider
+        - FARGATE
+        - FARGATE_SPOT
+      Cluster: !Ref EcsCluster
+      DefaultCapacityProviderStrategy: 
+        - Base: 0
+          CapacityProvider: !Ref EcsEc2CapacityProvider
+          Weight: 100
+  EcsAsg:
+    DependsOn: EcsCluster
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      # AutoScalingGroupName: ecs-asg
+      MinSize: "1"
+      DesiredCapacity: "1"
+      MaxSize: "1"
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref EcsLt
+        Version: !GetAtt EcsLt.LatestVersionNumber
+      AvailabilityZoneDistribution:
+        CapacityDistributionStrategy: balanced-only
+  EcsLt:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      # LaunchTemplateName: "asg-launch-template"
+      LaunchTemplateData:
+        ImageId: !Ref EcsAmiId
+        InstanceType: t3.medium
+        IamInstanceProfile: 
+          Name: !Ref EcsContainerInstanceProfile
+        SecurityGroupIds:
+          - !Ref EcsContainerInstanceSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+            dnf install -y aws-cfn-bootstrap
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+        KeyName: !Ref KeyPair
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: 
+              - Key: Name
+                Value : ecs-container-instance
+  EcsContainerInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: ecs-container-instance-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt Vpc.DefaultSecurityGroup
+      VpcId: !Ref Vpc
+  EcsContainerInstanceIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: ContainerInstanceIamRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  EcsContainerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref EcsContainerInstanceIamRole
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName : EcsTaskIamRole 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: []
+  EcsTaskExecutionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName : EcsTaskExecutionRole 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+  EcsServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: ecs-service-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt Vpc.DefaultSecurityGroup
+        - IpProtocol: TCP
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
+        - IpProtocol: TCP
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      VpcId: !Ref Vpc
+  
+  EcrSsmAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 900
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              dnf install -yq docker
+              systemctl start docker
+              systemctl enable docker
+              # usermod -aG docker ec2-user
+              # newgrp docker
+              chmod 666 /var/run/docker.sock
+
+              dnf install -yq git
+
+              su - ec2-user << EOF
+              mkdir -p /home/ec2-user/${GitHubRepo}
+              cd /home/ec2-user/${GitHubRepo}
+              echo 'from flask import Flask
+
+              app = Flask(__name__)
+
+              TAG = "ec2-v1.0.0"
+
+              @app.route("/")
+              def home():
+                  return f"Hello Korea!", 200
+
+              @app.route("/health")
+              def health():
+                  return "OK", 200
+
+              @app.route("/tag")
+              def tag():
+                  return TAG, 200
+
+              if __name__ == "__main__":
+                  app.run(host="0.0.0.0", port=80)' > /home/ec2-user/${GitHubRepo}/cicd-app.py
+              
+              aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+              
+              echo 'FROM python:3.13-slim
+              WORKDIR /app
+              COPY cicd-app.py .
+              RUN pip install --no-cache-dir Flask
+              RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+              CMD ["python", "cicd-app.py"]' > /home/ec2-user/${GitHubRepo}/Dockerfile
+              docker build -t ${Ecr.RepositoryUri}:latest .
+              docker push ${Ecr.RepositoryUri}:latest
+              
+              EOF
+  
+  GitHubSsmAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 900
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub 
+              - |
+                su - ec2-user << EOF
+                mkdir -p /home/ec2-user/${GitHubRepo}/.github/workflows
+                cd /home/ec2-user/${GitHubRepo}
+
+                echo $'name: ${GitHubAction}
+                on:
+                  push:
+                    branches: [ "${GitHubBranch}" ]
+                jobs:
+                  codebuild:
+                    runs-on:
+                      - codebuild-${CodeBuildProjectName}${Id}-\${!{ github.run_id }}-\${!{ github.run_attempt }}
+                    steps:
+                      - name: Repo Checkout
+                        uses: actions/checkout@v4
+                      - name: ECR Login
+                        id: login-ecr
+                        uses: aws-actions/amazon-ecr-login@v1
+                      - name: Docker Build and Push
+                        id: push-ecr
+                        env:
+                          ECR_REGISTRY: \${!{ steps.login-ecr.outputs.registry }}
+                          ECR_REPOSITORY: ${Ecr}
+                          IMAGE_TAG: \${!{ github.sha }}
+                        run: |
+                          docker build -t \$ECR_REGISTRY/\$ECR_REPOSITORY:\$IMAGE_TAG .
+                          docker build -t \$ECR_REGISTRY/\$ECR_REPOSITORY:latest .
+                          docker push \$ECR_REGISTRY/\$ECR_REPOSITORY:\$IMAGE_TAG
+                          docker push \$ECR_REGISTRY/\$ECR_REPOSITORY:latest
+                          echo "IMAGE=\$ECR_REGISTRY/\$ECR_REPOSITORY:\$IMAGE_TAG" >> \$GITHUB_ENV
+                      - name: ECS TaskDefinition
+                        id: update-taskdef
+                        uses: aws-actions/amazon-ecs-render-task-definition@v1
+                        with:
+                          task-definition: taskdef.json
+                          container-name: python
+                          image: \${!{ env.IMAGE }}
+                      - name: Fargate Check
+                        uses: mikefarah/yq@master
+                        with:
+                          cmd: |
+                            if grep -q \'TAG = "fargate"\' cicd-app.py; then
+                              yq -i \'.Resources[0].TargetService.Properties.CapacityProviderStrategy[0].CapacityProvider = "FARGATE"\' appspec.yaml
+                            else
+                              yq -i \'.Resources[0].TargetService.Properties.CapacityProviderStrategy[0].CapacityProvider = "${EcsEc2CapacityProvider}"\' appspec.yaml
+                            fi
+                      - name: ECS Service Deployment
+                        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+                        with:
+                          task-definition: \${!{ steps.update-taskdef.outputs.task-definition }}
+                          service: ${EcsService.Name}
+                          cluster: ${EcsCluster}
+                          codedeploy-appspec: appspec.yaml
+                          codedeploy-application: ${CodeDeployApplication}
+                          codedeploy-deployment-group: ${CodeDeployDeploymentGroup}
+                          wait-for-service-stability: true
+                ' > ./.github/workflows/codebuild.yaml
+
+                echo 'version: 0.0
+                Resources:
+                  - TargetService:
+                      Type: AWS::ECS::Service
+                      Properties:
+                        TaskDefinition: <TASK_DEFINITION>
+                        LoadBalancerInfo:
+                          ContainerName: python
+                          ContainerPort: 80
+                        CapacityProviderStrategy:
+                          - CapacityProvider: ${EcsEc2CapacityProvider}
+                            Weight: 1' > ./appspec.yaml
+
+                zip -r src.zip . -x "*/.*"
+                aws s3 cp src.zip s3://${SourceS3Bucket}
+                EOF
+              - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  SourceS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub
+        - "github-runner-bucket-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - EcrSsmAssociation
+    Properties:
+      Family: ecs-task-def
+      Cpu: "512"
+      Memory: "1024"
+      ContainerDefinitions: 
+        - Name: python
+          Image: !GetAtt Ecr.RepositoryUri
+          Essential: True
+          HealthCheck: 
+            Command: [ "CMD-SHELL", "curl -f http://localhost:80/health || exit 1" ]
+            Interval: 30
+            Retries: 5
+            StartPeriod: 5
+            Timeout: 5
+          PortMappings: 
+            - ContainerPort: 80
+              HostPort: 80
+              Name: http
+      NetworkMode: awsvpc
+      RequiresCompatibilities: 
+        - EC2
+        - FARGATE
+      RuntimePlatform: 
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionIamRole.Arn
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ecs-cicd-alb
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: alb-sg
+  BlueTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cicd-tg
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref Vpc
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+  GreenTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: green-tg
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref Vpc
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref BlueTargetGroup
+
+  EcsService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AlbListener
+    Properties:
+      ServiceName: ecs-cicd-service
+      Cluster: !Ref EcsCluster
+      LaunchType: EC2 # FARGATE로 교체 가능 (워크플로에서 TAG값에 따라 가능)
+      DesiredCount: 1
+      TaskDefinition: !Ref EcsTaskDefinition
+      DeploymentController:
+        Type: CODE_DEPLOY
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubnetA
+            - !Ref PrivateSubnetB
+          SecurityGroups:
+            - !Ref EcsServiceSecurityGroup
+      LoadBalancers:
+        - ContainerName: python
+          ContainerPort: 80
+          TargetGroupArn: !Ref BlueTargetGroup
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: ecs-codedeploy-app
+      ComputePlatform: ECS
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      DeploymentGroupName:  ecs-codedeploy-dg
+      ApplicationName: !Ref CodeDeployApplication
+      AutoRollbackConfiguration: 
+        Enabled: True
+        Events: 
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+          - DEPLOYMENT_STOP_ON_REQUEST
+      ServiceRoleArn: !GetAtt CodeDeployIamRole.Arn
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentStyle:
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+        DeploymentType: BLUE_GREEN
+      ECSServices:
+        - ClusterName: !Ref EcsCluster
+          ServiceName: !GetAtt EcsService.Name
+      LoadBalancerInfo: 
+        TargetGroupPairInfoList:
+          - ProdTrafficRoute:
+              ListenerArns:
+                - !GetAtt AlbListener.ListenerArn
+            TargetGroups:
+              - Name: !GetAtt BlueTargetGroup.TargetGroupName
+              - Name: !GetAtt GreenTargetGroup.TargetGroupName
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption: 
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+        TerminateBlueInstancesOnDeploymentSuccess: 
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: 0
+  CodeDeployIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: CodeDeployRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codedeploy.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
+  
+  GitHubRepository:
+    Type: AWS::CodeStar::GitHubRepository
+    DependsOn:
+      - GitHubSsmAssociation
+    Properties:
+      EnableIssues: True
+      IsPrivate: False
+      RepositoryAccessToken: !Ref GitHubToken
+      RepositoryName: !Ref GitHubRepo
+      RepositoryOwner: !Ref GitHubUser
+      Code:
+        S3:
+          Bucket: !Ref SourceS3Bucket
+          Key: "src.zip" 
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: github-connection
+      ProviderType: GitHub
+  GitHubCredential:
+    Type: AWS::CodeBuild::SourceCredential
+    Properties:
+      AuthType: PERSONAL_ACCESS_TOKEN
+      ServerType: GITHUB
+      Token: !Ref GitHubToken
+      Username: !Ref GitHubUser
+  
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn:
+      - GitHubRepository
+    Properties:
+      Name: !Sub
+        - ${CodeBuildProjectName}${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+      ServiceRole: !GetAtt CodeBuildIamRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL # BUILD_GENERAL1_MEDIUM | BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:5.0
+      Source:
+        Type: GITHUB
+        Location: !Sub https://github.com/${GitHubUser}/${GitHubRepo}.git
+        Auth: 
+          Type: OAUTH
+          Resource: !Ref GitHubConnection
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: WORKFLOW_JOB_QUEUED
+            - Type: WORKFLOW_NAME
+              Pattern: !Ref GitHubAction
+  CodeBuildIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: CodeBuildRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  
+  CicdSsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - CodeBuildProject
+      - CodeDeployDeploymentGroup
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 900
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              dnf install -yq git
+
+              su - ec2-user << EOF
+              cd /home/ec2-user/${GitHubRepo}
+              
+              git init
+              git remote add origin https://${GitHubToken}@github.com/${GitHubUser}/${GitHubRepo}.git
+              git checkout -b ${GitHubBranch}
+              aws ecs describe-task-definition --task-definition ecs-task-def --query "taskDefinition" > /home/ec2-user/${GitHubRepo}/taskdef.json
+              git add cicd-app.py
+              git add Dockerfile
+              git add taskdef.json
+              git add appspec.yaml
+              git add .github/workflows/codebuild.yaml
+              git commit -m "init"
+              git push --set-upstream origin ${GitHubBranch}
+              
+              EOF
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${BastionElasticIp}:8000
+    Description: VsCode on BastionEC2
+
+# aws ecs describe-task-definition --task-definition "ecs-green-taskdef" --query 'taskDefinition' --output json > temp.json
+# jq '.containerDefinitions |= map( if .name == "green" then .image = "<IMAGE1_NAME>" else . end ) | del(.revision, .status, .taskDefinitionArn, .requiresAttributes, .compatibilities, ."registeredAt", ."registeredBy")' temp.json > taskdef.json
+# rm temp.json
+# echo "version: 0.0
+# Resources:
+#   - TargetService:
+#       Type: AWS::ECS::Service
+#       Properties:
+#         TaskDefinition: <TASK_DEFINITION>
+#         LoadBalancerInfo:
+#           ContainerName: green
+#           ContainerPort: 8080" > appspec.yaml

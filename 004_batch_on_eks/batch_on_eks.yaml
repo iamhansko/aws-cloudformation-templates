@@ -136,7 +136,7 @@ Resources:
           GroupSet: 
             - !Ref BastionEc2SecurityGroup
       IamInstanceProfile: !Ref BastionEc2InstanceProfile
-      Tags: [{ Key: Name, Value: wsc2025-cicd-bastion }]
+      Tags: [{ Key: Name, Value: bastion }]
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash

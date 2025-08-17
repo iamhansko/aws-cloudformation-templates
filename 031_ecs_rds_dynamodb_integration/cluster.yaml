@@ -1,0 +1,1168 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  EcsAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
+  BastionEc2AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+  RdsUsername:
+    Type: String
+    Default: admin
+  RdsPassword:
+    Type: String
+    Default: dbpassword
+    NoEcho: True
+  RdsDatabase:
+    Type: String
+    Default: dev
+Mappings:
+  VpcMapping:
+    Vpc:
+      Name: vpc
+      Cidr: 10.0.0.0/16
+    Gateway:
+      IgwName: igw
+      NatgwNamePrefix: natgw-
+    RouteTable: 
+      PublicSubnetRouteTableName: public-rt
+      PrivateSubnetRouteTableNamePrefix: private-rt-
+  AzMapping: 
+    a:
+      # PublicSubnetA
+      PublicSubnetNamePrefix: public-subnet-
+      PublicSubnetCidr: 10.0.0.0/24
+      # PrivateSubnetA
+      PrivateSubnetNamePrefix: private-subnet-
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      # PublicSubnetB
+      PublicSubnetNamePrefix: public-subnet-
+      PublicSubnetCidr: 10.0.2.0/24
+      # PrivateSubnetB
+      PrivateSubnetNamePrefix: private-subnet-
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      # PublicSubnetC
+      PublicSubnetNamePrefix: public-subnet-
+      PublicSubnetCidr: 10.0.4.0/24
+      # PrivateSubnetC
+      PrivateSubnetNamePrefix: private-subnet-
+      PrivateSubnetCidr: 10.0.5.0/24
+
+Resources:
+  UserEcr:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: user
+      EmptyOnDelete: True
+  ProductEcr:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: product
+      EmptyOnDelete: True
+  StressEcr:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: stress
+      EmptyOnDelete: True
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT7M
+    Metadata: 
+      AWS::CloudFormation::Init:
+        configSets:
+          init: ["pythonInstall", "vscodeInstall"]
+          docker: ["dockerInstallandLogin", "dockerBuildandPush"]
+        # config:
+        #   packages: 
+        #   groups: 
+        #   users: 
+        #   sources: 
+        #   files: 
+        #   commands: 
+        #   services: 
+        pythonInstall:
+          commands:
+            install: 
+              command: !Sub |
+                dnf groupinstall -yq "Development Tools"
+                dnf install -yq python$version
+                ln -sf /usr/bin/python$version /usr/bin/python
+                /usr/bin/python$version -m ensurepip --upgrade
+              env:
+                version: 3.13
+              ignoreErrors: True
+        vscodeInstall: 
+          files:
+            /home/ec2-user/.config/code-server/config.yaml:
+              content: !Sub |
+                bind-addr: 0.0.0.0:8000
+                auth: none
+                cert: false
+              owner: ec2-user
+              group: ec2-user
+            /etc/systemd/system/code-server.service:
+              content: !Sub |
+                [Unit]
+                Description=VS Code Server
+                After=network.target
+                [Service]
+                Type=simple
+                User=ec2-user
+                ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+                Restart=always
+                [Install]
+                WantedBy=multi-user.target
+          commands:
+            install: 
+              command: !Sub |
+                wget -q https://github.com/coder/code-server/releases/download/v$version/code-server-$version-linux-amd64.tar.gz
+                tar -xzf code-server-$version-linux-amd64.tar.gz
+                mv code-server-$version-linux-amd64 /usr/local/lib/code-server
+                chown -R ec2-user:ec2-user /home/ec2-user/.config
+                ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+                systemctl daemon-reload
+                systemctl enable code-server
+                systemctl start code-server
+              env:
+                version: 4.102.2
+              ignoreErrors: True
+        dockerInstallandLogin:
+          commands:
+            install:
+              command: !Sub |
+                dnf install -yq docker
+                systemctl start docker
+                systemctl enable docker
+                # usermod -aG docker ec2-user
+                # newgrp docker
+                chmod 666 /var/run/docker.sock
+                aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+              ignoreErrors: True
+        dockerBuildandPush:
+          files:
+            /home/ec2-user/user/go.mod:
+              content: !Sub |
+                module userapp
+
+                go 1.22
+
+                require (
+                    github.com/gin-gonic/gin v1.10.0
+                    github.com/go-sql-driver/mysql v1.7.1
+                )
+              owner: ec2-user
+              group: ec2-user
+            /home/ec2-user/user/main.go:
+              content: !Sub |
+                package main
+
+                import (
+                  "database/sql"
+                  "fmt"
+                  "log"
+                  "net/http"
+                  "os"
+                  "time"
+
+                  "github.com/gin-gonic/gin"
+                  _ "github.com/go-sql-driver/mysql"
+                )
+
+                type User struct {
+                  RequestID     string `json:"requestid" binding:"required"`
+                  UUID          string `json:"uuid" binding:"required"`
+                  Username      string `json:"username" binding:"required"`
+                  Email         string `json:"email" binding:"required"`
+                  StatusMessage string `json:"status_message" binding:"required"`
+                }
+
+                var (
+                  db *sql.DB
+                )
+
+                func main() {
+                  mysqlUser := os.Getenv("MYSQL_USER")
+                  mysqlPass := os.Getenv("MYSQL_PASSWORD")
+                  mysqlHost := os.Getenv("MYSQL_HOST")
+                  mysqlPort := os.Getenv("MYSQL_PORT")
+                  mysqlDB := os.Getenv("MYSQL_DBNAME")
+
+                  dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", mysqlUser, mysqlPass, mysqlHost, mysqlPort, mysqlDB)
+                  var err error
+                  db, err = sql.Open("mysql", dsn)
+                  if err != nil {
+                    log.Fatalf("DB연결 실패: %v", err)
+                  }
+                  db.SetConnMaxLifetime(time.Minute * 3)
+                  db.SetMaxOpenConns(10)
+                  db.SetMaxIdleConns(10)
+
+                  router := gin.Default()
+                  router.Use(gin.Logger())
+                  router.Use(gin.Recovery())
+
+                  router.POST("/v1/user", postUser)
+                  router.GET("/v1/user", getUser)
+                  router.GET("/healthcheck", healthCheck)
+
+                  router.Run(":8080")
+                }
+
+                func postUser(c *gin.Context) {
+                  var user User
+                  if err := c.ShouldBindJSON(&user); err != nil {
+                    c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+                    return
+                  }
+
+                  _, err := db.Exec("INSERT INTO user (id, username, email, status_message) VALUES (?, ?, ?, ?)",
+                    user.UUID, user.Username, user.Email, user.StatusMessage)
+                  if err != nil {
+                    c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+                    return
+                  }
+                  c.JSON(http.StatusCreated, gin.H{"status": "created"})
+                }
+
+                func getUser(c *gin.Context) {
+                  email := c.Query("email")
+                  requestid := c.Query("requestid")
+                  uuid := c.Query("uuid")
+
+                  if email == "" || requestid == "" || uuid == "" {
+                    c.JSON(http.StatusBadRequest, gin.H{"error": "Missing query parameters"})
+                    return
+                  }
+
+                  var id, username, statusMessage string
+                  err := db.QueryRow("SELECT id, username, status_message FROM user WHERE email = ?", email).Scan(&id, &username, &statusMessage)
+                  if err != nil {
+                    if err == sql.ErrNoRows {
+                      c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+                    } else {
+                      c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+                    }
+                    return
+                  }
+                  c.JSON(http.StatusOK, gin.H{
+                    "id":             id,
+                    "username":       username,
+                    "email":          email,
+                    "status_message": statusMessage,
+                  })
+                }
+
+                func healthCheck(c *gin.Context) {
+                  c.JSON(http.StatusOK, gin.H{"status": "ok"})
+                }
+              owner: ec2-user
+              group: ec2-user
+            /home/ec2-user/user/Dockerfile:
+              content: !Sub |
+                FROM public.ecr.aws/docker/library/golang:1.22.2-alpine AS builder
+                WORKDIR /app
+                COPY . .
+                RUN go mod tidy
+                RUN go build -o userapp main.go
+                FROM public.ecr.aws/docker/library/amazonlinux:2023
+                WORKDIR /app
+                COPY --from=builder /app/userapp /app/userapp
+                RUN yum install -y ca-certificates && yum clean all
+                EXPOSE 8080
+                ENTRYPOINT ["/app/userapp"]
+              owner: ec2-user
+              group: ec2-user
+            /home/ec2-user/product/go.mod:
+              content: !Sub |
+                module productapp
+
+                go 1.22
+
+                require (
+                    github.com/aws/aws-sdk-go-v2 v1.24.0
+                    github.com/aws/aws-sdk-go-v2/config v1.24.0
+                    github.com/aws/aws-sdk-go-v2/service/dynamodb v1.24.0
+                    github.com/gin-gonic/gin v1.10.0
+                )
+              owner: ec2-user
+              group: ec2-user
+            /home/ec2-user/product/main.go:
+              content: !Sub |
+                package main
+
+                import (
+                    "context"
+                    "log"
+                    "net/http"
+                    "os"
+                    "strconv"
+
+                    "github.com/aws/aws-sdk-go-v2/config"
+                    "github.com/aws/aws-sdk-go-v2/service/dynamodb"
+                    "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+                    "github.com/gin-gonic/gin"
+                )
+
+                type Product struct {
+                    RequestID string  `json:"requestid" binding:"required"`
+                    UUID      string  `json:"uuid" binding:"required"`
+                    ID        string  `json:"id" binding:"required"`
+                    Name      string  `json:"name" binding:"required"`
+                    Price     float64 `json:"price" binding:"required"`
+                }
+
+                var (
+                    ddbClient   *dynamodb.Client
+                    tableName   string
+                    indexName   string
+                    ctx         = context.Background()
+                )
+
+                func main() {
+                    tableName = os.Getenv("TABLE_NAME")
+                    if tableName == "" {
+                        log.Fatal("환경변수 TABLE_NAME이 설정되지 않았습니다")
+                    }
+                    indexName = os.Getenv("TABLE_INDEX_NAME")
+
+                    cfg, err := config.LoadDefaultConfig(ctx)
+                    if err != nil {
+                        log.Fatalf("AWS config load failed: %v", err)
+                    }
+
+                    ddbClient = dynamodb.NewFromConfig(cfg)
+
+                    router := gin.Default()
+                    router.Use(gin.Logger())
+                    router.Use(gin.Recovery())
+
+                    router.POST("/v1/product", postProduct)
+                    router.GET("/v1/product", getProduct)
+                    router.GET("/healthcheck", healthCheck)
+
+                    router.Run(":8080")
+                }
+
+                func postProduct(c *gin.Context) {
+                    var p Product
+                    if err := c.ShouldBindJSON(&p); err != nil {
+                        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+                        return
+                    }
+
+                    item := map[string]types.AttributeValue{
+                        "id":   &types.AttributeValueMemberS{Value: p.ID},
+                        "name": &types.AttributeValueMemberS{Value: p.Name},
+                        "price": &types.AttributeValueMemberN{Value: strconv.FormatFloat(p.Price, 'f', 2, 64)},
+                    }
+
+                    _, err := ddbClient.PutItem(ctx, &dynamodb.PutItemInput{
+                        TableName: &tableName,
+                        Item:      item,
+                    })
+                    if err != nil {
+                        log.Printf("DynamoDB PutItem error: %v\n", err)
+                        c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal Server Error"})
+                        return
+                    }
+
+                    c.JSON(http.StatusCreated, gin.H{"status": "created"})
+                }
+
+                func getProduct(c *gin.Context) {
+                    id := c.Query("id")
+                    requestID := c.Query("requestid")
+                    uuid := c.Query("uuid")
+
+                    if id == "" || requestID == "" || uuid == "" {
+                        c.JSON(http.StatusBadRequest, gin.H{"error": "Missing query parameters"})
+                        return
+                    }
+
+                    key := map[string]types.AttributeValue{
+                        "id": &types.AttributeValueMemberS{Value: id},
+                    }
+
+                    out, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{
+                        TableName: &tableName,
+                        Key:       key,
+                    })
+                    if err != nil {
+                        log.Printf("DynamoDB GetItem error: %v\n", err)
+                        c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal Server Error"})
+                        return
+                    }
+
+                    if out.Item == nil {
+                        c.JSON(http.StatusNotFound, gin.H{"error": "product not found"})
+                        return
+                    }
+
+                    nameAttr, ok := out.Item["name"].(*types.AttributeValueMemberS)
+                    if !ok {
+                        c.JSON(http.StatusInternalServerError, gin.H{"error": "Malformed product data"})
+                        return
+                    }
+                    priceAttr, ok := out.Item["price"].(*types.AttributeValueMemberN)
+                    if !ok {
+                        c.JSON(http.StatusInternalServerError, gin.H{"error": "Malformed product data"})
+                        return
+                    }
+
+                    price, err := strconv.ParseFloat(priceAttr.Value, 64)
+                    if err != nil {
+                        c.JSON(http.StatusInternalServerError, gin.H{"error": "Malformed price data"})
+                        return
+                    }
+
+                    c.JSON(http.StatusOK, gin.H{
+                        "id":      id,
+                        "name":    nameAttr.Value,
+                        "price":   price,
+                    })
+                }
+
+                func healthCheck(c *gin.Context) {
+                    c.JSON(http.StatusOK, gin.H{"status": "ok"})
+                }
+              owner: ec2-user
+              group: ec2-user
+            /home/ec2-user/product/Dockerfile:
+              content: !Sub |
+                FROM public.ecr.aws/docker/library/golang:1.22.2-alpine AS builder
+                WORKDIR /app
+                COPY . .
+                RUN go mod tidy
+                RUN go build -o productapp main.go
+                FROM public.ecr.aws/docker/library/amazonlinux:2023
+                WORKDIR /app
+                COPY --from=builder /app/productapp /app/productapp
+                RUN yum install -y ca-certificates && yum clean all
+                EXPOSE 8080
+                ENTRYPOINT ["/app/productapp"]
+              owner: ec2-user
+              group: ec2-user
+            /home/ec2-user/stress/go.mod:
+              content: !Sub |
+                module stressapp
+
+                go 1.22
+
+                require (
+                    github.com/gin-gonic/gin v1.10.0
+                )
+              owner: ec2-user
+              group: ec2-user
+            /home/ec2-user/stress/main.go:
+              content: !Sub |
+                package main
+
+                import (
+                    "crypto/rand"
+                    "encoding/hex"
+                    "log"
+                    "net/http"
+
+                    "github.com/gin-gonic/gin"
+                )
+
+                type StressRequest struct {
+                    RequestID string `json:"requestid" binding:"required"`
+                    UUID      string `json:"uuid" binding:"required"`
+                    Length    int    `json:"length" binding:"required"`
+                }
+
+                func main() {
+                    router := gin.Default()
+                    router.Use(gin.Logger())
+                    router.Use(gin.Recovery())
+
+                    router.POST("/v1/stress", postStress)
+                    router.GET("/healthcheck", healthCheck)
+
+                    router.NoRoute(noRouteHandler)
+
+                    if err := router.Run(":8080"); err != nil {
+                        log.Fatalf("서버 시작 실패: %v", err)
+                    }
+                }
+
+                func postStress(c *gin.Context) {
+                    var req StressRequest
+                    if err := c.ShouldBindJSON(&req); err != nil {
+                        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+                        return
+                    }
+
+                    if req.Length <= 0 || req.Length > 10240 {
+                        c.JSON(http.StatusBadRequest, gin.H{"error": "length must be between 1 and 10240"})
+                        return
+                    }
+
+                    byteLen := (req.Length + 1) / 2
+
+                    buf := make([]byte, byteLen)
+                    _, err := rand.Read(buf)
+                    if err != nil {
+                        log.Printf("랜덤 생성 실패: %v", err)
+                        c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal Server Error"})
+                        return
+                    }
+                    randomStr := hex.EncodeToString(buf)
+                    if len(randomStr) > req.Length {
+                        randomStr = randomStr[:req.Length]
+                    }
+
+                    c.JSON(http.StatusCreated, gin.H{
+                        "requestid": req.RequestID,
+                        "uuid":      req.UUID,
+                        "length":    req.Length,
+                        "data":      randomStr,
+                    })
+                }
+
+                func healthCheck(c *gin.Context) {
+                    c.JSON(http.StatusOK, gin.H{"status": "ok"})
+                }
+
+                func noRouteHandler(c *gin.Context) {
+                    path := c.Request.URL.Path
+                    if len(path) >= 4 && path[:4] == "/v1/" {
+                        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+                    } else {
+                        c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+                    }
+                }
+              owner: ec2-user
+              group: ec2-user
+            /home/ec2-user/stress/Dockerfile:
+              content: !Sub |
+                FROM public.ecr.aws/docker/library/golang:1.22.2-alpine AS builder
+                WORKDIR /app
+                COPY . .
+                RUN go mod tidy
+                RUN go build -o stressapp main.go
+                FROM public.ecr.aws/docker/library/amazonlinux:2023
+                WORKDIR /app
+                COPY --from=builder /app/stressapp /app/stressapp
+                RUN yum install -y ca-certificates && yum clean all
+                EXPOSE 8080
+                ENTRYPOINT ["/app/stressapp"]
+              owner: ec2-user
+              group: ec2-user
+          commands:
+            userEcr:
+              command: !Sub |
+                cd /home/ec2-user/user
+                docker build -t ${UserEcr.RepositoryUri} .
+                docker push ${UserEcr.RepositoryUri}
+              ignoreErrors: True
+            productEcr:
+              command: !Sub |
+                cd /home/ec2-user/product
+                docker build -t ${ProductEcr.RepositoryUri} .
+                docker push ${ProductEcr.RepositoryUri}
+              ignoreErrors: True
+            stressEcr:
+              command: !Sub |
+                cd /home/ec2-user/stress
+                docker build -t ${StressEcr.RepositoryUri} .
+                docker push ${StressEcr.RepositoryUri}
+              ignoreErrors: True
+    Properties:
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      ImageId: !Ref BastionEc2AmiId
+      InstanceType: t3.small
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref BastionEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: bastion
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash -xe
+            timedatectl set-timezone Asia/Seoul
+            dnf update -yq
+            dnf install -yq git
+            dnf update -yq aws-cfn-bootstrap
+
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource BastionEc2 --configsets init --region ${AWS::Region}
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource BastionEc2 --configsets docker --region ${AWS::Region}
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Bastion EC2
+      GroupName: bastion-sg
+      SecurityGroupIngress: 
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+        - CidrIp: 0.0.0.0/0
+          FromPort: 8000
+          IpProtocol: tcp
+          ToPort: 8000
+      VpcId: !Ref Vpc
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      # RoleName: Ec2AdminRole
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      # InstanceProfileName: Ec2AdminProfile
+      Roles: 
+        - !Ref BastionEc2IamRole
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [VpcMapping, Vpc, Cidr]
+      EnableDnsSupport: True
+      EnableDnsHostnames: True # for EC2 PublicDnsName, ...
+      Tags:
+        - Key: Name
+          Value: !FindInMap [VpcMapping, Vpc, Name]
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !FindInMap [VpcMapping, Gateway, IgwName]
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !FindInMap [VpcMapping, RouteTable, PublicSubnetRouteTableName]
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, b]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr] # !Select [0, !Cidr [!GetAtt Vpc.CidrBlock, 6, 8]]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub
+                - ${Prefix}${Az}
+                - Prefix: !FindInMap [AzMapping, !Ref Az, PublicSubnetNamePrefix]
+            - Key: kubernetes.io/role/elb
+              Value: 1
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, b]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub
+                - ${Prefix}${Az}
+                - Prefix: !FindInMap [AzMapping, !Ref Az, PrivateSubnetNamePrefix]
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub 
+                - ${Prefix}${Az}
+                - Prefix: !FindInMap [VpcMapping, RouteTable, PrivateSubnetRouteTableNamePrefix]
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub 
+                - ${Prefix}${Az}
+                - Prefix: !FindInMap [VpcMapping, Gateway, NatgwNamePrefix]
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+  
+  DynamoTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: appdev-dynamo-table
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: price
+          AttributeType: N
+        # - AttributeName: name
+        #   AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+        - AttributeName: price
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  RdsInstancePrimary:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AllocatedStorage: 400
+      AllowMajorVersionUpgrade: True
+      ApplyImmediately: True
+      AutoMinorVersionUpgrade: True
+      BackupRetentionPeriod: 7
+      DatabaseInsightsMode: standard
+      DBInstanceClass: db.t3.micro
+      DBInstanceIdentifier: apdev-rds-instance
+      DBName: !Ref RdsDatabase
+      DBSubnetGroupName: !Ref RdsSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.42
+      Iops: 12000
+      MasterUsername: !Ref RdsUsername
+      MasterUserPassword: !Ref RdsPassword
+      MaxAllocatedStorage: 1000
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RdsMonitoringIamRole.Arn
+      MultiAZ: True
+      Port: 3306
+      # SourceDBInstanceIdentifier: String
+      StorageThroughput: 500 # 500~4000
+      StorageType: gp3
+      VPCSecurityGroups: 
+        - !Ref RdsInstanceSecurityGroup
+  RdsInstanceReplica:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AllocatedStorage: 400 # 20~6144
+      AllowMajorVersionUpgrade: True
+      ApplyImmediately: True
+      AutoMinorVersionUpgrade: True
+      BackupRetentionPeriod: 7
+      DatabaseInsightsMode: standard
+      DBInstanceClass: db.t3.micro
+      DBInstanceIdentifier: apdev-rds-replica
+      Iops: 12000 # 12000~64000
+      MaxAllocatedStorage: 1000
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RdsMonitoringIamRole.Arn
+      SourceDBInstanceIdentifier: !Ref RdsInstancePrimary
+      StorageThroughput: 500 # 500~4000
+      StorageType: gp3
+      VPCSecurityGroups: 
+        - !Ref RdsInstanceSecurityGroup
+  RdsInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: rds-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt Vpc.DefaultSecurityGroup
+        - IpProtocol: TCP
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
+        # - IpProtocol: TCP
+        #   FromPort: 3306
+        #   ToPort: 3306
+        #   SourceSecurityGroupId: !Ref EcsServiceSecurityGroup
+      VpcId: !Ref Vpc
+  RdsSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: RDS SubnetGroup
+      DBSubnetGroupName: rds-subnet-group
+      SubnetIds: 
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetb
+  RdsMonitoringIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - monitoring.rds.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      # RoleName: RdsMonitoringRole
+  
+  UserEcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - BastionEc2
+    Properties:
+      Family: user-taskdef
+      Cpu: "512"
+      Memory: "1024"
+      ContainerDefinitions: 
+        - Name: golang
+          Image: !GetAtt UserEcr.RepositoryUri
+          Essential: True
+          HealthCheck: 
+            Command: [ "CMD-SHELL", "curl -f http://localhost:8080/healthcheck || exit 1" ]
+            Interval: 30
+            Retries: 5
+            Timeout: 5
+          PortMappings: 
+            - ContainerPort: 8080
+              HostPort: 8080
+              Name: http
+          Environment:
+            - Name: MYSQL_USER
+              Value: !Ref RdsUsername
+            - Name: MYSQL_PASSWORD
+              Value: !Ref RdsPassword
+            - Name: MYSQL_HOST
+              Value: !GetAtt RdsInstancePrimary.Endpoint.Address
+            - Name: MYSQL_PORT
+              Value: !GetAtt RdsInstancePrimary.Endpoint.Port
+            - Name: MYSQL_DBNAME
+              Value: !Ref RdsDatabase
+      NetworkMode: awsvpc
+      RequiresCompatibilities: 
+        - EC2
+      RuntimePlatform: 
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionIamRole.Arn
+  ProductEcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - BastionEc2
+    Properties:
+      Family: user-taskdef
+      Cpu: "512"
+      Memory: "1024"
+      ContainerDefinitions: 
+        - Name: golang
+          Image: !GetAtt ProductEcr.RepositoryUri
+          Essential: True
+          HealthCheck: 
+            Command: [ "CMD-SHELL", "curl -f http://localhost:8080/healthcheck || exit 1" ]
+            Interval: 30
+            Retries: 5
+            Timeout: 5
+          PortMappings: 
+            - ContainerPort: 8080
+              HostPort: 8080
+              Name: http
+          Environment:
+            - Name: TABLE_NAME
+              Value: !Ref DynamoTable
+            - Name: TABLE_INDEX_NAME
+              Value: id
+      NetworkMode: awsvpc
+      RequiresCompatibilities: 
+        - EC2
+      RuntimePlatform: 
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionIamRole.Arn
+  StressEcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - BastionEc2
+    Properties:
+      Family: user-taskdef
+      Cpu: "512"
+      Memory: "1024"
+      ContainerDefinitions: 
+        - Name: golang
+          Image: !GetAtt StressEcr.RepositoryUri
+          Essential: True
+          HealthCheck: 
+            Command: [ "CMD-SHELL", "curl -f http://localhost:8080/healthcheck || exit 1" ]
+            Interval: 30
+            Retries: 5
+            Timeout: 5
+          PortMappings: 
+            - ContainerPort: 8080
+              HostPort: 8080
+              Name: http
+      NetworkMode: awsvpc
+      RequiresCompatibilities: 
+        - EC2
+      RuntimePlatform: 
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionIamRole.Arn
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName : EcsTaskIamRole 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  EcsTaskExecutionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName : EcsTaskExecutionRole 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/CloudWatchFullAccessV2
+  
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: ecs-cluster
+      ClusterSettings: 
+        - Name: containerInsights
+          Value: enhanced
+  EcsEc2CapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      # Name: ec2-capacity-provider
+      AutoScalingGroupProvider: 
+        AutoScalingGroupArn: !GetAtt EcsAsg.AutoScalingGroupARN
+        ManagedDraining: ENABLED
+        ManagedScaling: 
+          InstanceWarmupPeriod: 30
+          MaximumScalingStepSize: 10000
+          MinimumScalingStepSize: 1
+          Status: ENABLED
+          TargetCapacity: 100
+        ManagedTerminationProtection: DISABLED
+  EcsEc2CapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      CapacityProviders: 
+        - !Ref EcsEc2CapacityProvider
+        - FARGATE
+        - FARGATE_SPOT
+      Cluster: !Ref EcsCluster
+      DefaultCapacityProviderStrategy: 
+        - Base: 0
+          CapacityProvider: !Ref EcsEc2CapacityProvider
+          Weight: 100
+  EcsAsg:
+    DependsOn: EcsCluster
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      # AutoScalingGroupName: ecs-asg
+      MinSize: "3"
+      DesiredCapacity: "3"
+      MaxSize: "3"
+      VPCZoneIdentifier:
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetb
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref EcsLt
+        Version: !GetAtt EcsLt.LatestVersionNumber
+      AvailabilityZoneDistribution:
+        CapacityDistributionStrategy: balanced-only
+  EcsLt:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      # LaunchTemplateName: asg-launch-template
+      LaunchTemplateData:
+        ImageId: !Ref EcsAmiId
+        InstanceType: t3.medium
+        IamInstanceProfile: 
+          Name: !Ref EcsContainerInstanceProfile
+        SecurityGroupIds:
+          - !Ref EcsContainerInstanceSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+            dnf install -y aws-cfn-bootstrap
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+        KeyName: !Ref KeyPair
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: 
+              - Key: Name
+                Value : ecs-container-instance
+  EcsContainerInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: ecs-container-instance-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt Vpc.DefaultSecurityGroup
+      VpcId: !Ref Vpc
+  EcsContainerInstanceIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: ContainerInstanceIamRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  EcsContainerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref EcsContainerInstanceIamRole
+  
+  UserEcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: user-service
+      Cluster: !Ref EcsCluster
+      LaunchType: EC2
+      DesiredCount: 1
+      TaskDefinition: !Ref UserEcsTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubneta
+            - !Ref PrivateSubnetb
+          SecurityGroups:
+            - !Ref EcsServiceSecurityGroup
+  ProductEcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: product-service
+      Cluster: !Ref EcsCluster
+      LaunchType: EC2
+      DesiredCount: 1
+      TaskDefinition: !Ref ProductEcsTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubneta
+            - !Ref PrivateSubnetb
+          SecurityGroups:
+            - !Ref EcsServiceSecurityGroup
+  StressEcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: stress-service
+      Cluster: !Ref EcsCluster
+      LaunchType: EC2
+      DesiredCount: 1
+      TaskDefinition: !Ref StressEcsTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubneta
+            - !Ref PrivateSubnetb
+          SecurityGroups:
+            - !Ref EcsServiceSecurityGroup
+  EcsServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: ecs-service-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          CidrIp: !GetAtt Vpc.CidrBlock
+        - IpProtocol: TCP
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
+      VpcId: !Ref Vpc

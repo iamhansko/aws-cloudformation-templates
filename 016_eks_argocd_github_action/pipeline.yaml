@@ -1,0 +1,628 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CI/CD (ap-southeast-1)
+Transform: AWS::LanguageExtensions
+
+Parameters:
+  AmazonLinux2023AmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+  GitHubUser:
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubUser] must not be empty
+  GitHubToken:
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubToken] must not be empty
+  GitHubRepo:
+    Type: String
+    Default: argocd-repo
+  GitHubAction:
+    Type: String
+    Default: argocd
+  EksCluster:
+    Type: String
+    Default: cluster
+  EksVersion:
+    Type: String
+    Default: 1.32
+  EksNodegroup: 
+    Type: String
+    Default: app-ng
+  EksNodeInstanceType:
+    Type: String
+    Default: t3.medium
+  EksNodeName:
+    Type: String
+    Default: app-node
+  
+Mappings: 
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.2.0/24
+    b: 
+      PublicSubnetCidr: 10.0.1.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+Resources:
+  Ecr:
+    Type: AWS::ECR::Repository
+    Properties: # From : nignx:latest
+      RepositoryName: app-repo # Tag : vX.X.X
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: ws2025-cicd-vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: ws2025-cicd-igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: ws2025-cicd-public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, b]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub ws2025-cicd-public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, b]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub ws2025-cicd-private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub ws2025-cicd-private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT7M
+    Properties:
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      ImageId: !Ref AmazonLinux2023AmiId
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref BastionEc2SecurityGroup
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      Tags: [{ Key: Name, Value: cicd-bastion }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+
+          wget https://github.com/coder/code-server/releases/download/v4.100.3/code-server-4.100.3-linux-amd64.tar.gz
+          tar -xzf code-server-4.100.3-linux-amd64.tar.gz
+          mv code-server-4.100.3-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Bastion EC2 SSH Connection"
+      GroupName: bastion-sg
+      SecurityGroupIngress: 
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+        - CidrIp: 0.0.0.0/0
+          FromPort: 8000
+          IpProtocol: tcp
+          ToPort: 8000
+      VpcId: !Ref Vpc
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref BastionEc2IamRole]
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  BastionEc2SecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
+      GroupId: !Ref BastionEc2SecurityGroup
+
+  GitHubSsmAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 900
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub 
+              - |
+                su - ec2-user << EOF
+                mkdir -p /home/ec2-user/${GitHubRepo}/.github/workflows
+                mkdir -p /home/ec2-user/${GitHubRepo}/manifest
+                cd /home/ec2-user/${GitHubRepo}
+
+                echo $'name: ${GitHubAction}
+                permissions:
+                  contents: write
+                on:
+                  push:
+                    branches: [ "master" ]
+                    paths: [ "index.html" ]
+                jobs:
+                  codebuild:
+                    runs-on:
+                      - codebuild-project${Id}-\${!{ github.run_id }}-\${!{ github.run_attempt }}
+                    steps:
+                      - name: Check out the repo
+                        uses: actions/checkout@v4
+                      - name: ECR Login
+                        id: login-ecr
+                        uses: aws-actions/amazon-ecr-login@v2
+                      - name: Docker Build adn Push
+                        env:
+                          REGISTRY: \${!{ steps.login-ecr.outputs.registry }}
+                          REPOSITORY: ${Ecr}
+                        run: |
+                          echo \'FROM nginx:latest
+                          COPY index.html /usr/share/nginx/html/index.html
+                          CMD ["nginx", "-g", "daemon off;"]\' > Dockerfile
+                          IMAGE_TAG=\$(cat version)
+                          docker build -t \$REGISTRY/\$REPOSITORY:\$IMAGE_TAG .
+                          docker push \$REGISTRY/\$REPOSITORY:\$IMAGE_TAG
+                          echo "IMAGE=\$REGISTRY/\$REPOSITORY:\$IMAGE_TAG" >> \$GITHUB_ENV
+                      - name: Deployment Update
+                        id: update-deployment
+                        uses: mikefarah/yq@master
+                        with:
+                          cmd: yq -i \'.spec.template.spec.containers[0].image = \"\${!{ env.IMAGE }}\"\' ./manifest/deployment.yaml
+                      - name: Git Commit and Push
+                        run: |
+                          git config --global user.email "abc@abc.com"
+                          git config --global user.name "GitHubAction"
+                          git add ./manifest
+                          git commit -m "Update Deployment Image"
+                          git push' > ./.github/workflows/codebuild.yaml
+
+                echo '<!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <title>Nginx Test Page - v1</title>
+                    <style>
+                        body {
+                            font-family: Arial, sans-serif;
+                            text-align: center;
+                            padding-top: 100px;
+                            background-color: #f0f0f0;
+                        }
+                        h1 {
+                            color: #333;
+                        }
+                        .version {
+                            font-size: 20px;
+                            color: #555;
+                            margin-top: 20px;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <h1>Welcome to Nginx!</h1>
+                    <div class="version">Version: v1</div>
+                </body>
+                </html>' > ./index.html
+
+                echo 'v1.0.0' > ./version
+
+                echo 'apiVersion: apps/v1
+                kind: Deployment
+                metadata:
+                  name: nginx-deploy
+                  labels:
+                    app: nginx
+                spec:
+                  replicas: 3
+                  selector:
+                    matchLabels:
+                      app: nginx
+                  template:
+                    metadata:
+                      labels:
+                        app: nginx
+                    spec:
+                      containers:
+                      - name: nginx
+                        image: nginx:latest
+                ' > ./manifest/deployment.yaml
+
+                echo 'apiVersion: v1
+                kind: Service
+                metadata:
+                  name: nginx-service
+                spec:
+                  selector:
+                    app: nginx
+                  ports:
+                    - protocol: TCP
+                      port: 80
+                      targetPort: 80' > ./manifest/service.yaml
+
+                echo 'apiVersion: networking.k8s.io/v1
+                kind: Ingress
+                metadata:
+                  name: nginx-ingress
+                  annotations:
+                    alb.ingress.kubernetes.io/load-balancer-name: cicd-alb
+                    alb.ingress.kubernetes.io/scheme: internet-facing
+                    alb.ingress.kubernetes.io/target-type: ip
+                spec:
+                  ingressClassName: alb
+                  rules:
+                  - http:
+                      paths:
+                      - path: /
+                        pathType: Prefix
+                        backend:
+                          service:
+                            name: nginx-service
+                            port:
+                              number: 80' > ./manifest/ingress.yaml
+
+                zip -r src.zip . "./*"
+                aws s3 cp src.zip s3://${SourceS3Bucket}
+
+                EOF
+              - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  SourceS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub
+        - "github-runner-bucket-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  GitHubRepository:
+    Type: AWS::CodeStar::GitHubRepository
+    DependsOn:
+      - GitHubSsmAssociation
+    Properties:
+      EnableIssues: True
+      IsPrivate: False
+      RepositoryAccessToken: !Ref GitHubToken
+      RepositoryName: !Ref GitHubRepo
+      RepositoryOwner: !Ref GitHubUser
+      Code:
+        S3:
+          Bucket: !Ref SourceS3Bucket
+          Key: "src.zip" 
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: github-connection
+      ProviderType: GitHub
+  GitHubCredential:
+    Type: AWS::CodeBuild::SourceCredential
+    Properties:
+      AuthType: PERSONAL_ACCESS_TOKEN
+      ServerType: GITHUB
+      Token: !Ref GitHubToken
+      Username: !Ref GitHubUser
+  
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn:
+      - GitHubRepository
+    Properties:
+      Name: !Sub
+        - project${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+      ServiceRole: !GetAtt CodeBuildIamRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL # BUILD_GENERAL1_MEDIUM | BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:5.0
+      Source:
+        Type: GITHUB
+        Location: !Sub https://github.com/${GitHubUser}/${GitHubRepo}.git
+        Auth: 
+          Type: OAUTH
+          Resource: !Ref GitHubConnection
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: WORKFLOW_JOB_QUEUED
+            - Type: WORKFLOW_NAME
+              Pattern: !Ref GitHubAction
+  CodeBuildIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: CodeBuildRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  
+  EksSsmAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 3600
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              su - ec2-user << 'EOF'
+              export HOME="/home/ec2-user"
+              
+              curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.32.3/2025-04-17/bin/linux/amd64/kubectl
+              chmod +x ./kubectl
+              mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$HOME/bin:$PATH
+              echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
+
+              ARCH=amd64
+              PLATFORM=$(uname -s)_$ARCH
+              curl -sLO "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
+              tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm eksctl_$PLATFORM.tar.gz
+              sudo install -m 0755 /tmp/eksctl /usr/local/bin && rm /tmp/eksctl
+
+              curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+              chmod 700 get_helm.sh
+              ./get_helm.sh
+              helm version
+
+              echo 'apiVersion: eksctl.io/v1alpha5
+              kind: ClusterConfig
+              metadata:
+                name: ${EksCluster}
+                region: ${AWS::Region}
+                version:	"${EksVersion}"
+              iam:
+                withOIDC:	true
+                serviceAccounts:
+                  - metadata:
+                      name: aws-load-balancer-controller
+                      namespace: kube-system
+                    wellKnownPolicies:
+                      awsLoadBalancerController: true
+                    roleName: AmazonEKSLoadBalancerControllerRole
+              vpc:
+                id:	${Vpc}
+                subnets:
+                  public:
+                    public1:
+                      id: ${PublicSubneta}
+                    public2:
+                      id: ${PublicSubnetb}
+                  private:
+                    private1:
+                      id: ${PrivateSubneta}
+                    private2:
+                      id: ${PrivateSubnetb}
+                clusterEndpoints:	
+                  privateAccess: true
+                  publicAccess: true
+                controlPlaneSecurityGroupIDs:
+                  - ${BastionEc2SecurityGroup.GroupId}
+              cloudWatch:
+                clusterLogging:
+                  enableTypes:
+                    - api
+                    - audit
+                    - authenticator
+                    - controllerManager
+                    - scheduler
+              managedNodeGroups:
+                - name: ${EksNodegroup}
+                  amiFamily: AmazonLinux2023
+                  instanceType: ${EksNodeInstanceType}
+                  minSize: 2
+                  desiredCapacity: 2
+                  maxSize: 2
+                  privateNetworking: true
+                  instanceName: ${EksNodeName}
+                  iam:
+                    attachPolicyARNs:
+                      - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+                      - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+                      - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+                      - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+                  preBootstrapCommands:
+                    - timedatectl set-timezone Asia/Seoul
+              addons:
+                - name: coredns
+                  resolveConflicts: overwrite
+                - name: kube-proxy
+                  resolveConflicts: overwrite
+                - name: vpc-cni
+                  resolveConflicts: overwrite
+              ' > cluster.yaml 
+    
+              eksctl create cluster -f cluster.yaml
+
+              export LBC_VERSION="1.13.0"
+              helm repo add eks https://aws.github.io/eks-charts
+              helm repo update eks
+              helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+              -n kube-system \
+              --set clusterName=${EksCluster} \
+              --set serviceAccount.create=false \
+              --set serviceAccount.name=aws-load-balancer-controller \
+              --version $LBC_VERSION \
+              --set region=${AWS::Region} \
+              --set vpcId=${Vpc}
+              kubectl -n kube-system rollout status deployment aws-load-balancer-controller
+
+              kubectl -n kube-system rollout status daemonset aws-node
+              kubectl -n kube-system rollout status daemonset kube-proxy
+              kubectl -n kube-system rollout status deployment coredns
+              sleep 120
+
+              curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+              sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+              rm argocd-linux-amd64
+
+              kubectl create namespace argocd
+              kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+              sleep 10
+              kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+              # Use ELB or kube-proxy
+              sleep 120
+
+              echo '#!/bin/bash
+              export ARGOCD_SERVER_DOMAIN=$(kubectl get svc -n argocd argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+              export ARGOCD_SERVER_PASSWORD=$(argocd admin initial-password -n argocd | cut -d " " -f1 | tr -d "\n")
+              argocd login $ARGOCD_SERVER_DOMAIN --insecure --username admin --password $ARGOCD_SERVER_PASSWORD
+              sleep 60
+              argocd login $ARGOCD_SERVER_DOMAIN --insecure --username admin --password $ARGOCD_SERVER_PASSWORD
+              sleep 60
+              argocd login $ARGOCD_SERVER_DOMAIN --insecure --username admin --password $ARGOCD_SERVER_PASSWORD
+              argocd cluster add $(kubectl config get-contexts -o name) -y
+              kubectl config set-context --current --namespace=argocd
+              argocd app create argo-app --sync-policy automated --self-heal --repo https://github.com/${GitHubUser}/${GitHubRepo}.git --path manifest --dest-server https://kubernetes.default.svc --dest-namespace default
+              # argocd app sync argo-app
+              kubectl config set-context --current --namespace=default' > argocd.sh
+              chmod +x argocd.sh
+              ./argocd.sh
+
+              EOF

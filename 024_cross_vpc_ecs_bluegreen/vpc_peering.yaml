@@ -1,0 +1,2448 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: VPC_A <-> VPC_B Peering Connection
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: S3 Bucket Name
+        Parameters:
+          - RandomNumber
+      - Label:
+          default: VPC
+        Parameters:
+          - VpcAName
+          - VpcACidr
+          - VpcBName
+          - VpcBCidr
+          - VpcPeeringName
+      - Label:
+          default: VPC_A_SUBNETS
+        Parameters:
+          - VpcAPubSubnetAName
+          - VpcAPubSubnetACidr
+          - VpcAPubSubnetCName
+          - VpcAPubSubnetCCidr
+          - VpcAPubRtName
+          - VpcAIgwName
+      - Label:
+          default: VPC_B_SUBNETS
+        Parameters:
+          - VpcBPubSubnetAName
+          - VpcBPubSubnetACidr
+          - VpcBPubSubnetBName
+          - VpcBPubSubnetBCidr
+          - VpcBPubSubnetCName
+          - VpcBPubSubnetCCidr
+          - VpcBPubSubnetAName
+          - VpcBPubSubnetACidr
+          - VpcBPubSubnetBName
+          - VpcBPubSubnetBCidr
+          - VpcBPubSubnetCName
+          - VpcBPubSubnetCCidr
+          - VpcBPrivSubnetAName
+          - VpcBPrivSubnetACidr
+          - VpcBPrivSubnetBName
+          - VpcBPrivSubnetBCidr
+          - VpcBPrivSubnetCName
+          - VpcBPrivSubnetCCidr
+          - VpcBInternalSubnetAName
+          - VpcBInternalSubnetACidr
+          - VpcBInternalSubnetCName
+          - VpcBInternalSubnetCCidr
+          - VpcBPubRtName
+          - VpcBIgwName
+          - VpcBPrivARtName
+          - VpcBNatgwAName
+          - VpcBPrivBRtName
+          - VpcBNatgwBName
+          - VpcBPrivCRtName
+          - VpcBNatgwCName
+          - VpcBInternalARtName
+          - VpcBInternalCRtName
+      - Label:
+          default: BASTION_EC2
+        Parameters:
+          - BastionEc2AmiId
+      - Label:
+          default: RDS
+        Parameters:
+          - RdsUsername
+          - RdsPassword
+          - RdsDatabase
+      - Label:
+          default: ECS
+        Parameters:
+          - EcsAmiId
+
+Parameters:
+  RandomNumber:
+    Type: String
+    AllowedPattern: '\d{4}'
+    ConstraintDescription: Parameter [RandomNumber] must not be empty (4 Digits)
+  VpcAName:
+    Type: String
+    Default: ws25-hub-vpc
+  VpcACidr:
+    Type: String
+    Default: 172.28.0.0/16
+  VpcBName:
+    Type: String
+    Default: ws25-app-vpc
+  VpcBCidr:
+    Type: String
+    Default: 10.200.0.0/16
+  VpcAPubSubnetAName:
+    Type: String
+    Default: ws25-hub-pub-a
+  VpcAPubSubnetACidr:
+    Type: String
+    Default: 172.28.0.0/20
+  VpcAPubSubnetCName:
+    Type: String
+    Default: ws25-hub-pub-c
+  VpcAPubSubnetCCidr:
+    Type: String
+    Default: 172.28.16.0/20
+  VpcBPubSubnetAName:
+    Type: String
+    Default: ws25-app-pub-a
+  VpcBPubSubnetACidr:
+    Type: String
+    Default: 10.200.10.0/24
+  VpcBPubSubnetBName:
+    Type: String
+    Default: ws25-app-pub-b
+  VpcBPubSubnetBCidr:
+    Type: String
+    Default: 10.200.11.0/24
+  VpcBPubSubnetCName:
+    Type: String
+    Default: ws25-app-pub-c
+  VpcBPubSubnetCCidr:
+    Type: String
+    Default: 10.200.12.0/24
+  VpcBPrivSubnetAName:
+    Type: String
+    Default: ws25-app-pri-a
+  VpcBPrivSubnetACidr:
+    Type: String
+    Default: 10.200.20.0/24
+  VpcBPrivSubnetBName:
+    Type: String
+    Default: ws25-app-pri-b
+  VpcBPrivSubnetBCidr:
+    Type: String
+    Default: 10.200.21.0/24
+  VpcBPrivSubnetCName:
+    Type: String
+    Default: ws25-app-pri-c
+  VpcBPrivSubnetCCidr:
+    Type: String
+    Default: 10.200.22.0/24
+  VpcBInternalSubnetAName:
+    Type: String
+    Default: ws25-app-db-a
+  VpcBInternalSubnetACidr:
+    Type: String
+    Default: 10.200.30.0/24
+  VpcBInternalSubnetCName:
+    Type: String
+    Default: ws25-app-db-c
+  VpcBInternalSubnetCCidr:
+    Type: String
+    Default: 10.200.31.0/24
+  VpcAPubRtName:
+    Type: String
+    Default: ws25-hub-pub-rt
+  VpcAIgwName:
+    Type: String
+    Default: ws25-hub-igw
+  VpcBPubRtName:
+    Type: String
+    Default: ws25-app-pub-rt
+  VpcBIgwName:
+    Type: String
+    Default: ws25-app-igw
+  VpcBPrivARtName:
+    Type: String
+    Default: ws25-app-pri-rt-a
+  VpcBNatgwAName:
+    Type: String
+    Default: ws25-app-ngw-a
+  VpcBPrivBRtName:
+    Type: String
+    Default: ws25-app-pri-rt-b
+  VpcBNatgwBName:
+    Type: String
+    Default: ws25-app-ngw-b
+  VpcBPrivCRtName:
+    Type: String
+    Default: ws25-app-pri-rt-c
+  VpcBNatgwCName:
+    Type: String
+    Default: ws25-app-ngw-c
+  VpcBInternalARtName:
+    Type: String
+    Default: ws25-app-db-rt-a
+  VpcBInternalCRtName:
+    Type: String
+    Default: ws25-app-db-rt-c
+  VpcPeeringName:
+    Type: String
+    Default: ws25-peering
+  BastionEc2AmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+  RdsUsername:
+    Type: String
+    Default: admin
+  RdsPassword:
+    Type: String
+    Default: dbpassword
+    NoEcho: True
+  RdsDatabase:
+    Type: String
+    Default: day1
+  EcsAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
+
+Resources:
+  VpcA:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcACidr
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: !Ref VpcAName
+  VpcB:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcBCidr
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBName
+  
+  VpcAIgw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref VpcAIgwName
+  VpcAIgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref VpcAIgw
+      VpcId: !Ref VpcA
+  VpcAPublicRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref VpcAPubRtName
+      VpcId: !Ref VpcA
+  VpcAPublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref VpcAIgw
+      RouteTableId: !Ref VpcAPublicRt
+  VpcAPublicPeeringRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !GetAtt VpcB.CidrBlock
+      VpcPeeringConnectionId: !Ref VpcPeeringConnection
+      RouteTableId: !Ref VpcAPublicRt
+
+  # VPC A - Public Subnet (AZ a)
+  VpcAPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: !Ref VpcAPubSubnetACidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Ref VpcAPubSubnetAName
+      VpcId: !Ref VpcA
+  VpcAPublicSubnetARtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VpcAPublicRt
+      SubnetId: !Ref VpcAPublicSubnetA
+  
+  # VPC A - Public Subnet (AZ c)
+  VpcAPublicSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}c
+      CidrBlock: !Ref VpcAPubSubnetCCidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Ref VpcAPubSubnetCName
+      VpcId: !Ref VpcA
+  VpcAPublicSubnetCRtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VpcAPublicRt
+      SubnetId: !Ref VpcAPublicSubnetC
+  
+  VpcBIgw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBIgwName
+  VpcBIgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref VpcBIgw
+      VpcId: !Ref VpcB
+  VpcBPublicRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBPubRtName
+      VpcId: !Ref VpcB
+  VpcBPublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref VpcBIgw
+      RouteTableId: !Ref VpcBPublicRt
+  VpcBPublicPeeringRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !GetAtt VpcA.CidrBlock
+      VpcPeeringConnectionId: !Ref VpcPeeringConnection
+      RouteTableId: !Ref VpcBPublicRt
+
+  # VPC B - Public Subnet (AZ a)
+  VpcBPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: !Ref VpcBPubSubnetACidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBPubSubnetAName
+      VpcId: !Ref VpcB
+  VpcBPublicSubnetARtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VpcBPublicRt
+      SubnetId: !Ref VpcBPublicSubnetA
+  
+  # VPC B - Public Subnet (AZ b)
+  VpcBPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}b
+      CidrBlock: !Ref VpcBPubSubnetBCidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBPubSubnetBName
+      VpcId: !Ref VpcB
+  VpcBPublicSubnetBRtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VpcBPublicRt
+      SubnetId: !Ref VpcBPublicSubnetB
+  
+  # VPC B - Public Subnet (AZ c)
+  VpcBPublicSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}c
+      CidrBlock: !Ref VpcBPubSubnetCCidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBPubSubnetCName
+      VpcId: !Ref VpcB
+  VpcBPublicSubnetCRtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VpcBPublicRt
+      SubnetId: !Ref VpcBPublicSubnetC
+
+  # VPC B - Private Subnet (AZ a)
+  VpcBPrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: !Ref VpcBPrivSubnetACidr
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBPrivSubnetAName
+      VpcId: !Ref VpcB
+  VpcBNatgwAElasticIp:
+    Type: AWS::EC2::EIP
+  VpcBNatgwA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt VpcBNatgwAElasticIp.AllocationId
+      SubnetId: !Ref VpcBPublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBNatgwAName
+  VpcBPrivARt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBPrivARtName
+      VpcId: !Ref VpcB
+  VpcBPrivARtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VpcBPrivARt
+      SubnetId: !Ref VpcBPrivateSubnetA
+  VpcBPrivateSubnetARoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref VpcBNatgwA
+      RouteTableId: !Ref VpcBPrivARt
+  VpcBPrivateSubnetAPeeringRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !GetAtt VpcA.CidrBlock
+      VpcPeeringConnectionId: !Ref VpcPeeringConnection
+      RouteTableId: !Ref VpcBPrivARt
+  
+  # VPC B - Private Subnet (AZ b)
+  VpcBPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}b
+      CidrBlock: !Ref VpcBPrivSubnetBCidr
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBPrivSubnetBName
+      VpcId: !Ref VpcB
+  VpcBNatgwBElasticIp:
+    Type: AWS::EC2::EIP
+  VpcBNatgwB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt VpcBNatgwBElasticIp.AllocationId
+      SubnetId: !Ref VpcBPublicSubnetB
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBNatgwBName
+  VpcBPrivBRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBPrivBRtName
+      VpcId: !Ref VpcB
+  VpcBPrivBRtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VpcBPrivBRt
+      SubnetId: !Ref VpcBPrivateSubnetB
+  VpcBPrivateSubnetBRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref VpcBNatgwB
+      RouteTableId: !Ref VpcBPrivBRt
+  VpcBPrivateSubnetBPeeringRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !GetAtt VpcA.CidrBlock
+      VpcPeeringConnectionId: !Ref VpcPeeringConnection
+      RouteTableId: !Ref VpcBPrivBRt
+  
+  # VPC B - Private Subnet (AZ c)
+  VpcBPrivateSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}c
+      CidrBlock: !Ref VpcBPrivSubnetCCidr
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBPrivSubnetCName
+      VpcId: !Ref VpcB
+  VpcBNatgwCElasticIp:
+    Type: AWS::EC2::EIP
+  VpcBNatgwC:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt VpcBNatgwCElasticIp.AllocationId
+      SubnetId: !Ref VpcBPublicSubnetC
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBNatgwCName
+  VpcBPrivCRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBPrivCRtName
+      VpcId: !Ref VpcB
+  VpcBPrivCRtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VpcBPrivCRt
+      SubnetId: !Ref VpcBPrivateSubnetC
+  VpcBPrivateSubnetCRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref VpcBNatgwC
+      RouteTableId: !Ref VpcBPrivCRt
+  VpcBPrivateSubnetCPeeringRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !GetAtt VpcA.CidrBlock
+      VpcPeeringConnectionId: !Ref VpcPeeringConnection
+      RouteTableId: !Ref VpcBPrivCRt
+  
+  # VPC B - Internal Subnet (AZ a)
+  VpcBInternalSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: !Ref VpcBInternalSubnetACidr
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBInternalSubnetAName
+      VpcId: !Ref VpcB
+  VpcBInternalARt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBInternalARtName
+      VpcId: !Ref VpcB
+  VpcBInternalARtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VpcBInternalARt
+      SubnetId: !Ref VpcBInternalSubnetA
+  VpcBInternalSubnetAPeeringRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !GetAtt VpcA.CidrBlock
+      VpcPeeringConnectionId: !Ref VpcPeeringConnection
+      RouteTableId: !Ref VpcBInternalARt
+  
+  # VPC B - Internal Subnet (AZ c)
+  VpcBInternalSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}c
+      CidrBlock: !Ref VpcBInternalSubnetCCidr
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBInternalSubnetCName
+      VpcId: !Ref VpcB
+  VpcBInternalCRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref VpcBInternalCRtName
+      VpcId: !Ref VpcB
+  VpcBInternalCRtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VpcBInternalCRt
+      SubnetId: !Ref VpcBInternalSubnetC
+  VpcBInternalSubnetCPeeringRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: !GetAtt VpcA.CidrBlock
+      VpcPeeringConnectionId: !Ref VpcPeeringConnection
+      RouteTableId: !Ref VpcBInternalCRt
+
+  VpcPeeringConnection:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties:
+      VpcId: !GetAtt VpcA.VpcId
+      PeerVpcId: !GetAtt VpcB.VpcId
+      Tags: 
+        - Key: Name
+          Value: !Ref VpcPeeringName
+  
+  VpcAFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt VpcAIamRole.Arn
+      # LogDestination: !GetAtt VpcACloudWatchLogGroup.Arn
+      LogDestinationType: cloud-watch-logs
+      # LogFormat: String
+      LogGroupName: /ws25/flow/hub
+      MaxAggregationInterval: 600
+      ResourceId: !GetAtt VpcA.VpcId
+      ResourceType: VPC
+      Tags: 
+        - Key: Name
+          Value: vpc-a-flow-log
+      TrafficType: ALL # ACCEPT / ALL / REJECT
+  # VpcACloudWatchLogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   DeletionPolicy: Delete
+  #   Properties:
+  #     LogGroupName: /ws25/flow/hub
+  VpcAIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: VpcAFlowLogIamRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: 
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - vpc-flow-logs.amazonaws.com
+      Policies:
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: '*'
+  
+  VpcBFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt VpcBIamRole.Arn
+      # LogDestination: !GetAtt VpcACloudWatchLogGroup.Arn
+      LogDestinationType: cloud-watch-logs
+      # LogFormat: String
+      LogGroupName: /ws25/flow/app
+      MaxAggregationInterval: 600
+      ResourceId: !GetAtt VpcB.VpcId
+      ResourceType: VPC
+      Tags: 
+        - Key: Name
+          Value: vpc-a-flow-log
+      TrafficType: ALL # ACCEPT / ALL / REJECT
+  # VpcBCloudWatchLogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   DeletionPolicy: Delete
+  #   Properties:
+  #     LogGroupName: /ws25/flow/app
+  VpcBIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: VpcBFlowLogIamRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: 
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - vpc-flow-logs.amazonaws.com
+      Policies:
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: '*'
+
+  VpcBS3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds: 
+        - !Ref VpcBPrivARt
+        - !Ref VpcBPrivBRt
+        - !Ref VpcBPrivCRt
+        - !Ref VpcBInternalARt
+        - !Ref VpcBInternalCRt
+      VpcId: !Ref VpcB
+      # DnsOptions: 
+      #   DnsRecordIpType: ipv4 | ipv6 | dualstack | service-defined | not-specified
+      #   PrivateDnsOnlyForInboundResolverEndpoint: OnlyInboundResolver | AllResolvers | NotSpecified
+      # IpAddressType: ipv4 | ipv6 | dualstack | not-specified
+      # PolicyDocument: Json
+  
+  VpcBEcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+      VpcEndpointType: Interface
+      SubnetIds: 
+        - !Ref VpcBPrivateSubnetA
+        - !Ref VpcBPrivateSubnetB
+        - !Ref VpcBPrivateSubnetC
+      SecurityGroupIds:
+        - !Ref VpcBEcrDkrEndpointSecurityGroup
+      VpcId: !Ref VpcB
+      PrivateDnsEnabled: True
+  VpcBEcrDkrEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: ecr-dkr-vpce-sg
+      SecurityGroupIngress: 
+        # - IpProtocol: -1
+        #   SourceSecurityGroupId: !GetAtt VpcB.DefaultSecurityGroup
+        # EC2 ImagePull
+        # - IpProtocol: -1
+        #   SourceSecurityGroupId: !Ref EcsContainerInstanceSecurityGroup
+        # Fargate ImagePull
+        # - IpProtocol: -1
+        #   SourceSecurityGroupId: !Ref EcsServiceSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcBCidr
+      VpcId: !Ref VpcB
+  
+  VpcBEcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+      VpcEndpointType: Interface
+      SubnetIds: 
+        - !Ref VpcBPrivateSubnetA
+        - !Ref VpcBPrivateSubnetB
+        - !Ref VpcBPrivateSubnetC
+      SecurityGroupIds:
+        - !Ref VpcBEcrApiEndpointSecurityGroup
+      VpcId: !Ref VpcB
+      PrivateDnsEnabled: True
+  VpcBEcrApiEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: ecr-api-vpce-sg
+      SecurityGroupIngress: 
+        # - IpProtocol: -1
+        #   SourceSecurityGroupId: !GetAtt VpcB.DefaultSecurityGroup
+        # EC2 ImagePull
+        # - IpProtocol: -1
+        #   SourceSecurityGroupId: !Ref EcsContainerInstanceSecurityGroup
+        # Fargate ImagePull
+        # - IpProtocol: -1
+        #   SourceSecurityGroupId: !Ref EcsServiceSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcBCidr
+      VpcId: !Ref VpcB
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT7M
+    Properties:
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      ImageId: !Ref BastionEc2AmiId
+      InstanceType: t3.small
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref VpcAPublicSubnetC
+          GroupSet: 
+            - !Ref BastionEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: ws25-ec2-bastion
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              dnf update -y
+              dnf groupinstall -y "Development Tools"
+              dnf install -y python3.12
+              dnf install -y python3-pip
+              ln -s /usr/bin/python3.12 /usr/bin/python
+
+              dnf install -y git
+
+              wget https://github.com/coder/code-server/releases/download/v4.100.3/code-server-4.100.3-linux-amd64.tar.gz
+              tar -xzf code-server-4.100.3-linux-amd64.tar.gz
+              mv code-server-4.100.3-linux-amd64 /usr/local/lib/code-server
+              ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+
+              mkdir -p /home/ec2-user/.config/code-server
+              cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+              bind-addr: 0.0.0.0:8000
+              auth: none
+              cert: false
+              EOF
+              chown -R ec2-user:ec2-user /home/ec2-user/.config
+              
+              cat <<EOF > /etc/systemd/system/code-server.service
+              [Unit]
+              Description=VS Code Server
+              After=network.target
+              [Service]
+              Type=simple
+              User=ec2-user
+              ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+              Restart=always
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+              systemctl daemon-reload
+              systemctl enable code-server
+              systemctl start code-server
+
+              sed -i 's/#Port 22/Port 10100/' /etc/ssh/sshd_config
+              sudo systemctl restart sshd
+              # ssh -i key.pem -p 10100 ec2-user@public_ip
+
+              export NLB_PRIVATE_IPS=$(aws ec2 describe-network-interfaces --filters Name=description,Values="ELB ${AppNlb.LoadBalancerFullName}" --query 'NetworkInterfaces[*].PrivateIpAddresses[*].PrivateIpAddress' --output text)
+              TARGETS=""; for IP in $NLB_PRIVATE_IPS; do TARGETS+=" Id=$IP,AvailabilityZone=all"; done
+              aws elbv2 register-targets --target-group-arn ${HubNlbTargetGroup.TargetGroupArn} --targets $TARGETS
+
+              /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Bastion EC2 SSH Connection"
+      GroupName: bastion-sg
+      SecurityGroupIngress: 
+        - CidrIp: 0.0.0.0/0
+          FromPort: 10100
+          IpProtocol: tcp
+          ToPort: 10100
+        - CidrIp: 0.0.0.0/0
+          FromPort: 8000
+          IpProtocol: tcp
+          ToPort: 8000
+      VpcId: !Ref VpcA
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      RoleName: Ec2AdminRole
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: Ec2AdminRole
+      Roles: 
+        - !Ref BastionEc2IamRole
+  BastionEc2ElasticIp:
+    Type: AWS::EC2::EIP
+  BastionEc2ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt BastionEc2ElasticIp.AllocationId
+      InstanceId: !Ref BastionEc2
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  KmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Delete
+    Properties:
+      Enabled: True
+      EnableKeyRotation: True
+      RotationPeriodInDays: 90
+  KmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/ws25-kms
+      TargetKeyId: !Ref KmsKey
+
+  RdsSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    Properties:
+      KmsKeyId: !GetAtt KmsKey.Arn
+      Name: ws25/secret/key
+      SecretString: !Sub '{"DB_URL":"${RdsCluster.Endpoint.Address}:10101","DB_USER":"${RdsUsername}","DB_PASSWD":"${RdsPassword}"}'
+  RdsCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DBClusterIdentifier: ws25-rdb-cluster
+      DatabaseName: !Ref RdsDatabase
+      Engine: aurora-mysql
+      # DBClusterInstanceClass: db.t4g.medium
+      # aws rds describe-db-engine-versions --engine aurora-mysql --query "DBEngineVersions[].EngineVersion"
+      EngineVersion: 8.0.mysql_aurora.3.09.0 # 8.0.mysql_aurora.3.08.2
+      # AssociatedRoles: 
+      #   - FeatureName: String
+      #     RoleArn: String
+      AutoMinorVersionUpgrade: True
+      AvailabilityZones: 
+        - !Sub ${AWS::Region}a
+        - !Sub ${AWS::Region}c
+      BacktrackWindow: 10800
+      BackupRetentionPeriod: 34
+      # ClusterScalabilityType: String
+      # CopyTagsToSnapshot: Boolean
+      DatabaseInsightsMode: standard
+      # DBClusterParameterGroupName: String
+      # DBInstanceParameterGroupName: String
+      DBSubnetGroupName: !Ref RdsSubnetGroup
+      # DBSystemId: String
+      # DeleteAutomatedBackups: Boolean
+      # DeletionProtection: Boolean
+      # Domain: String
+      # DomainIAMRoleName: String
+      EnableCloudwatchLogsExports: 
+        - audit
+        - error
+        - general
+        - instance
+      # EnableGlobalWriteForwarding: Boolean
+      # EnableHttpEndpoint: Boolean
+      # EnableIAMDatabaseAuthentication: Boolean
+      # EnableLocalWriteForwarding: Boolean
+      # GlobalClusterIdentifier: String
+      # Iops: Integer
+      KmsKeyId: !Ref KmsKey
+      ManageMasterUserPassword: False
+      MasterUsername: !Ref RdsUsername
+      MasterUserPassword: !Ref RdsPassword
+      # MasterUserSecret: 
+      #   KmsKeyId: String
+      #   SecretArn: String
+      MonitoringInterval: 10
+      MonitoringRoleArn: !GetAtt RdsEnhancedMonitoringIamRole.Arn
+      # NetworkType: String
+      PerformanceInsightsEnabled: True
+      PerformanceInsightsKmsKeyId: !Ref KmsKey
+      PerformanceInsightsRetentionPeriod: 7
+      Port: 10101
+      # PreferredBackupWindow: String
+      # PreferredMaintenanceWindow: String
+      # PubliclyAccessible: Boolean
+      # ReplicationSourceIdentifier: String
+      # RestoreToTime: String
+      # RestoreType: String
+      # ScalingConfiguration: 
+      #   AutoPause: Boolean
+      #   MaxCapacity: Integer
+      #   MinCapacity: Integer
+      #   SecondsBeforeTimeout: Integer
+      #   SecondsUntilAutoPause: Integer
+      #   TimeoutAction: String
+      # ServerlessV2ScalingConfiguration: 
+      #   MaxCapacity: Number
+      #   MinCapacity: Number
+      #   SecondsUntilAutoPause: Integer
+      # SnapshotIdentifier: String
+      # SourceDBClusterIdentifier: String
+      # SourceRegion: String
+      StorageEncrypted: True
+      # StorageType: String
+      # UseLatestRestorableTime: Boolean
+      VpcSecurityGroupIds: 
+        - !GetAtt RdsSecurityGroup.GroupId
+  RdsSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: RDS SubnetGroup
+      DBSubnetGroupName: rds-subnet-group
+      SubnetIds: 
+        - !Ref VpcBInternalSubnetA
+        - !Ref VpcBInternalSubnetC
+  RdsEnhancedMonitoringIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - monitoring.rds.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      RoleName: RdsEnhancedMonitoringRole
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: rds-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt VpcB.DefaultSecurityGroup
+        - IpProtocol: TCP
+          FromPort: 10101
+          ToPort: 10101
+          SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
+        - IpProtocol: TCP
+          FromPort: 10101
+          ToPort: 10101
+          SourceSecurityGroupId: !Ref EcsServiceSecurityGroup
+      VpcId: !Ref VpcB
+  RdsInstanceA:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: rds-instance-a
+      DBInstanceClass: db.t4g.medium
+      Engine: aurora-mysql
+      AvailabilityZone: !Sub ${AWS::Region}a
+      DBClusterIdentifier: !Ref RdsCluster
+      AutoMinorVersionUpgrade: True
+      AllowMajorVersionUpgrade: True
+      ApplyImmediately: True
+      # AutomaticBackupReplicationKmsKeyId: String
+      # AutomaticBackupReplicationRegion: String
+      # AutomaticBackupReplicationRetentionPeriod: Integer
+      # BackupRetentionPeriod: Integer
+      # BackupTarget: String
+      # CACertificateIdentifier: String
+      # CertificateRotationRestart: Boolean
+      # CharacterSetName: String
+      # CopyTagsToSnapshot: Boolean
+      # CustomIAMInstanceProfile: String
+      # NcharCharacterSetName: String
+      # NetworkType: String
+      # ProcessorFeatures: 
+      #   - Name: String
+      #     Value: String
+      # PromotionTier: Integer
+      # PubliclyAccessible: Boolean
+      # RestoreTime: String
+      # UseDefaultProcessorFeatures: Boolean
+      # UseLatestRestorableTime: Boolean
+  RdsInstanceC:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: rds-instance-c
+      DBInstanceClass: db.t4g.medium
+      Engine: aurora-mysql
+      AvailabilityZone: !Sub ${AWS::Region}c
+      DBClusterIdentifier: !Ref RdsCluster
+      AutoMinorVersionUpgrade: True
+      AllowMajorVersionUpgrade: True
+      ApplyImmediately: True
+
+  GreenEcr:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: green
+      EncryptionConfiguration: 
+        EncryptionType: AES256
+      ImageScanningConfiguration: 
+        ScanOnPush: True
+      ImageTagMutability: IMMUTABLE
+      # EmptyOnDelete: Boolean
+      # LifecyclePolicy: 
+      #   LifecyclePolicyText: String
+      #   RegistryId: String
+      # RepositoryPolicyText: Json
+  RedEcr:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: red
+      EncryptionConfiguration: 
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+      ImageScanningConfiguration: 
+        ScanOnPush: True
+      ImageTagMutability: IMMUTABLE
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: ws25-ecs-cluster
+      ClusterSettings: 
+        - Name: containerInsights
+          Value: enhanced
+      Configuration:
+        ManagedStorageConfiguration: 
+          KmsKeyId: !Ref KmsKey
+        #   FargateEphemeralStorageKmsKeyId: String
+        # ExecuteCommandConfiguration: 
+        #   KmsKeyId: String
+        #   LogConfiguration: 
+        #     CloudWatchEncryptionEnabled: Boolean
+        #     CloudWatchLogGroupName: String
+        #     S3BucketName: String
+        #     S3EncryptionEnabled: Boolean
+        #     S3KeyPrefix: String
+        #   Logging: DEFAULT
+      # ServiceConnectDefaults: 
+      #   Namespace: String
+  EcsEc2CapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: ec2-capacity-provider
+      AutoScalingGroupProvider: 
+        AutoScalingGroupArn: !GetAtt EcsAsg.AutoScalingGroupARN
+        ManagedDraining: ENABLED
+        ManagedScaling: 
+          InstanceWarmupPeriod: 30
+          MaximumScalingStepSize: 10000
+          MinimumScalingStepSize: 1
+          Status: ENABLED
+          TargetCapacity: 100
+        ManagedTerminationProtection: DISABLED
+  EcsEc2CapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      CapacityProviders: 
+        - !Ref EcsEc2CapacityProvider
+        - FARGATE
+        - FARGATE_SPOT
+      Cluster: !Ref EcsCluster
+      DefaultCapacityProviderStrategy: 
+        - Base: 0
+          CapacityProvider: !Ref EcsEc2CapacityProvider
+          Weight: 100
+  EcsAsg:
+    DependsOn: EcsCluster
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: ecs-asg
+      MinSize: "3"
+      DesiredCapacity: "3"
+      MaxSize: "3"
+      VPCZoneIdentifier:
+        - !Ref VpcBPrivateSubnetA
+        - !Ref VpcBPrivateSubnetB
+        - !Ref VpcBPrivateSubnetC
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref EcsLt
+        Version: !GetAtt EcsLt.LatestVersionNumber
+      AvailabilityZoneDistribution:
+        CapacityDistributionStrategy: balanced-only
+  EcsLt:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: "asg-launch-template"
+      LaunchTemplateData:
+        ImageId: !Ref EcsAmiId
+        InstanceType: t3.medium
+        IamInstanceProfile: 
+          Name: !Ref EcsContainerInstanceProfile
+        SecurityGroupIds:
+          - !Ref EcsContainerInstanceSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+            dnf install -y aws-cfn-bootstrap
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+        KeyName: !Ref KeyPair
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: 
+              - Key: Name
+                Value : ws25-ecs-container-green
+  EcsContainerInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: ecs-container-instance-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt VpcB.DefaultSecurityGroup
+      VpcId: !Ref VpcB
+  EcsContainerInstanceIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      RoleName: ContainerInstanceIamRole
+  EcsContainerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: ContainerInstanceProfile
+      Roles: 
+        - !Ref EcsContainerInstanceIamRole
+  
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName : EcsTaskIamRole 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName : EcsTaskExecutionIamRole 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+        - arn:aws:iam::aws:policy/PowerUserAccess
+  EcsServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: ecs-service-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt VpcB.DefaultSecurityGroup
+        - IpProtocol: TCP
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref BastionEc2SecurityGroup
+        - IpProtocol: TCP
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AppAlbSecurityGroup
+      VpcId: !Ref VpcB
+  
+  GreenTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - EcrSsmAssociation
+    Properties:
+      Family: ws25-ecs-green-taskdef
+      Cpu: "1024"
+      Memory: "1024"
+      ContainerDefinitions: 
+        - Name: green
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/green:v1.0.0
+          Essential: True
+          HealthCheck: 
+            Command: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
+            Interval: 30
+            Retries: 5
+            StartPeriod: 5
+            Timeout: 5
+          PortMappings: 
+            - ContainerPort: 8080
+              HostPort: 8080
+              Name: http
+          Secrets:
+            - Name: DB_URL
+              ValueFrom: !Sub "${RdsSecret}:DB_URL::"
+            - Name: DB_USER
+              ValueFrom: !Sub "${RdsSecret}:DB_USER::"
+            - Name: DB_PASSWD
+              ValueFrom: !Sub "${RdsSecret}:DB_PASSWD::"
+          LogConfiguration:
+            LogDriver: awsfirelens
+            Options:
+              Name: "cloudwatch"
+              log_group_name: "/ws25/logs/green"
+              auto_create_group: "true"
+              log_stream_name: "Green-$(ecs_task_id)"
+              region: !Ref AWS::Region
+              exclude-pattern: "health"
+        - Name: log_router
+          Image: "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable"
+          Essential: True
+          User: "0"
+          FirelensConfiguration:
+            Type: fluentbit
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: "firelens"
+              awslogs-region: !Ref AWS::Region
+              awslogs-create-group: "true"
+              awslogs-stream-prefix: "ecs"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: 
+        - EC2
+      RuntimePlatform: 
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+  RedTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - EcrSsmAssociation
+    Properties:
+      Family: ws25-ecs-red-taskdef
+      Cpu: "512"
+      Memory: "1024"
+      ContainerDefinitions: 
+        - Name: red
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/red:v1.0.0
+          Essential: True
+          HealthCheck: 
+            Command: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
+            Interval: 30
+            Retries: 5
+            StartPeriod: 5
+            Timeout: 5
+          PortMappings: 
+            - ContainerPort: 8080
+              HostPort: 8080
+              Name: http
+          Secrets:
+            - Name: DB_URL
+              ValueFrom: !Sub "${RdsSecret}:DB_URL::"
+            - Name: DB_USER
+              ValueFrom: !Sub "${RdsSecret}:DB_USER::"
+            - Name: DB_PASSWD
+              ValueFrom: !Sub "${RdsSecret}:DB_PASSWD::"
+          LogConfiguration:
+            LogDriver: awsfirelens
+            Options:
+              Name: "cloudwatch"
+              log_group_name: "/ws25/logs/red"
+              auto_create_group: "true"
+              log_stream_name: "Red-$(ecs_task_id)"
+              region: !Ref AWS::Region
+              exclude-pattern: "health"
+        - Name: log_router
+          Image: "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable"
+          Essential: True
+          User: "0"
+          FirelensConfiguration:
+            Type: fluentbit
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: "firelens"
+              awslogs-region: !Ref AWS::Region
+              awslogs-create-group: "true"
+              awslogs-stream-prefix: "ecs"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform: 
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+  
+  GreenService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - GreenListenerRule
+      - RedListenerRule
+    Properties:
+      ServiceName: ws25-ecs-green
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref GreenTaskDefinition
+      DesiredCount: 3
+      AvailabilityZoneRebalancing: ENABLED
+      LaunchType: EC2
+      DeploymentController: 
+        Type: CODE_DEPLOY
+      NetworkConfiguration: 
+        AwsvpcConfiguration: 
+          AssignPublicIp: DISABLED
+          SecurityGroups: 
+            - !Ref EcsServiceSecurityGroup
+          Subnets: 
+            - !Ref VpcBPrivateSubnetA
+            - !Ref VpcBPrivateSubnetB
+            - !Ref VpcBPrivateSubnetC
+      LoadBalancers: 
+        - ContainerName: green
+          ContainerPort: 8080
+          TargetGroupArn: !GetAtt GreenTargetGroupBlue.TargetGroupArn
+  RedService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - GreenListenerRule
+      - RedListenerRule
+    Properties:
+      ServiceName: ws25-ecs-red
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref RedTaskDefinition
+      DesiredCount: 3
+      AvailabilityZoneRebalancing: ENABLED
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DeploymentController: 
+        Type: CODE_DEPLOY
+      NetworkConfiguration: 
+        AwsvpcConfiguration: 
+          AssignPublicIp: DISABLED
+          SecurityGroups: 
+            - !Ref EcsServiceSecurityGroup
+          Subnets: 
+            - !Ref VpcBPrivateSubnetA
+            - !Ref VpcBPrivateSubnetB
+            - !Ref VpcBPrivateSubnetC
+      LoadBalancers: 
+        - ContainerName: red
+          ContainerPort: 8080
+          TargetGroupArn: !GetAtt RedTargetGroupBlue.TargetGroupArn
+  
+  AppAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ws25-app-alb
+      Subnets:
+        - !Ref VpcBPrivateSubnetA
+        - !Ref VpcBPrivateSubnetB
+        - !Ref VpcBPrivateSubnetC
+      SecurityGroups:
+        - !Ref AppAlbSecurityGroup
+      Scheme: internal
+      Type: application
+  AppAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: app-alb-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt VpcB.DefaultSecurityGroup
+        - IpProtocol: TCP
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref AppNlbSecurityGroup
+      VpcId: !Ref VpcB
+  AppAlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref AppAlb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: 404
+            ContentType: text/plain
+            MessageBody: "<center><h1>404 Not Found</h1></center>"
+  GreenListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref AppAlbListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /green/
+            - /green
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GreenTargetGroupBlue
+  RedListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref AppAlbListener
+      Priority: 2
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /red/
+            - /red
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref RedTargetGroupBlue
+  GreenHealthCheckListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref AppAlbListener
+      Priority: 3
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /health
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GreenTargetGroupBlue
+  RedHealthCheckListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref AppAlbListener
+      Priority: 4
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /health
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref RedTargetGroupBlue
+  ErrorListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref AppAlbListener
+      Priority: 5
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /error
+      Actions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: 500
+            ContentType: text/plain
+            MessageBody: "<center><h1>500 Internal Server Error</h1></center>"
+  GreenTargetGroupBlue:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ws25-ecs-green-tg-blue
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !GetAtt VpcB.VpcId
+      HealthCheckPath: /health
+      HealthCheckPort: 8080
+      HealthCheckProtocol: HTTP
+      TargetGroupAttributes:
+        - Key: "deregistration_delay.timeout_seconds"
+          Value: "30"
+  GreenTargetGroupGreen:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ws25-ecs-green-tg-green
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !GetAtt VpcB.VpcId
+      HealthCheckPath: /health
+      HealthCheckPort: 8080
+      HealthCheckProtocol: HTTP
+      TargetGroupAttributes:
+        - Key: "deregistration_delay.timeout_seconds"
+          Value: "30"
+  RedTargetGroupBlue:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ws25-ecs-red-tg-blue
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !GetAtt VpcB.VpcId
+      HealthCheckPath: /health
+      HealthCheckPort: 8080
+      HealthCheckProtocol: HTTP
+      TargetGroupAttributes:
+        - Key: "deregistration_delay.timeout_seconds"
+          Value: "30"
+  RedTargetGroupGreen:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ws25-ecs-red-tg-green
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !GetAtt VpcB.VpcId
+      HealthCheckPath: /health
+      HealthCheckPort: 8080
+      HealthCheckProtocol: HTTP
+      TargetGroupAttributes:
+        - Key: "deregistration_delay.timeout_seconds"
+          Value: "30"
+
+  EcrSsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - GreenEcr
+      - RedEcr
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 900
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              dnf install -yq docker
+              systemctl start docker
+              systemctl enable docker
+              # usermod -aG docker ec2-user
+              # newgrp docker
+              chmod 666 /var/run/docker.sock
+
+              su - ec2-user << EOF
+              cd /home/ec2-user
+              git clone https://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@github.com/AWS-Skills/2025-korea-practice.git
+              mv 2025-korea-practice/경기1과제/src/* /home/ec2-user/
+              
+              aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+              
+              echo 'FROM ubuntu:latest
+              ENV CGO_ENABLED 0
+              WORKDIR /app
+              COPY ./green_1.0.0 ./green_1.0.0
+              RUN apt-get update && apt-get install -y curl
+              RUN chmod +x ./green_1.0.0
+              RUN useradd -u 2000 green
+              USER green
+              EXPOSE 8080
+              CMD ["./green_1.0.0"]' > Dockerfile.green100
+              docker build -f Dockerfile.green100 -t ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/green:v1.0.0 .
+              docker push ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/green:v1.0.0
+
+              echo 'FROM ubuntu:latest
+              ENV CGO_ENABLED 0
+              WORKDIR /app
+              COPY ./green_1.0.1 ./green_1.0.1
+              RUN apt-get update && apt-get install -y curl
+              RUN chmod +x ./green_1.0.1
+              RUN useradd -u 2000 green
+              USER green
+              EXPOSE 8080
+              CMD ["./green_1.0.1"]' > Dockerfile.green101
+              docker build -f Dockerfile.green101 -t ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/green:v1.0.1 .
+              docker push ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/green:v1.0.1
+
+              echo 'FROM ubuntu:latest
+              ENV CGO_ENABLED 0
+              WORKDIR /app
+              COPY ./red_1.0.0 ./red_1.0.0
+              RUN apt-get update && apt-get install -y curl
+              RUN chmod +x ./red_1.0.0
+              RUN useradd -u 2000 red
+              USER red
+              EXPOSE 8080
+              CMD ["./red_1.0.0"]' > Dockerfile.red100
+              docker build -f Dockerfile.red100 -t ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/red:v1.0.0 .
+              docker push ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/red:v1.0.0
+
+              echo 'FROM ubuntu:latest
+              ENV CGO_ENABLED 0
+              WORKDIR /app
+              COPY ./red_1.0.1 ./red_1.0.1
+              RUN apt-get update && apt-get install -y curl
+              RUN chmod +x ./red_1.0.1
+              RUN useradd -u 2000 red
+              USER red
+              EXPOSE 8080
+              CMD ["./red_1.0.1"]' > Dockerfile.red101
+              docker build -f Dockerfile.red101 -t ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/red:v1.0.1 .
+              docker push ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/red:v1.0.1
+              
+              EOF
+
+  CodeSuiteSsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - GreenTaskDefinition
+      - RedTaskDefinition
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 900
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              su - ec2-user << EOF
+              mkdir -p /home/ec2-user/pipeline/artifact/green
+              mkdir -p /home/ec2-user/pipeline/artifact/red
+
+              sleep 10
+              
+              cd /home/ec2-user/pipeline/artifact/green
+              echo '{"ImageURI": "${GreenEcr.RepositoryUri}:v1.0.1"}' > imageDetail.json
+              aws ecs describe-task-definition --task-definition "ws25-ecs-green-taskdef" --query 'taskDefinition' --output json > temp.json
+              jq '.containerDefinitions |= map( if .name == "green" then .image = "<IMAGE1_NAME>" else . end ) | del(.revision, .status, .taskDefinitionArn, .requiresAttributes, .compatibilities, ."registeredAt", ."registeredBy")' temp.json > taskdef.json
+              rm temp.json
+              echo "version: 0.0
+              Resources:
+                - TargetService:
+                    Type: AWS::ECS::Service
+                    Properties:
+                      TaskDefinition: <TASK_DEFINITION>
+                      LoadBalancerInfo:
+                        ContainerName: green
+                        ContainerPort: 8080" > appspec.yaml
+              echo '#!/bin/bash
+              cd /home/ec2-user/pipeline/artifact/green
+              zip artifact.zip *
+              aws s3 cp artifact.zip s3://${GreenSourceS3Bucket}
+              rm artifact.zip' > /home/ec2-user/pipeline/green.sh
+              chmod +x /home/ec2-user/pipeline/green.sh
+
+              cd /home/ec2-user/pipeline/artifact/red
+              echo '{"ImageURI": "${RedEcr.RepositoryUri}:v1.0.1"}' > imageDetail.json
+              aws ecs describe-task-definition --task-definition "ws25-ecs-red-taskdef" --query 'taskDefinition' --output json > temp.json
+              jq '.containerDefinitions |= map( if .name == "red" then .image = "<IMAGE1_NAME>" else . end ) | del(.revision, .status, .taskDefinitionArn, .requiresAttributes, .compatibilities, ."registeredAt", ."registeredBy")' temp.json > taskdef.json
+              rm temp.json
+              echo "version: 0.0
+              Resources:
+                - TargetService:
+                    Type: AWS::ECS::Service
+                    Properties:
+                      TaskDefinition: <TASK_DEFINITION>
+                      LoadBalancerInfo:
+                        ContainerName: red
+                        ContainerPort: 8080" > appspec.yaml
+              echo '#!/bin/bash
+              cd /home/ec2-user/pipeline/artifact/red
+              zip artifact.zip *
+              aws s3 cp artifact.zip s3://${RedSourceS3Bucket}
+              rm artifact.zip' > /home/ec2-user/pipeline/red.sh
+              chmod +x /home/ec2-user/pipeline/red.sh
+
+              EOF
+  
+  SqlSsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - RdsCluster
+      - RdsInstanceA
+      - RdsInstanceC
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 900
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              su - ec2-user << EOF
+              cd /home/ec2-user
+
+              echo 'CREATE DATABASE IF NOT EXISTS day1;
+
+              USE day1;
+
+              CREATE TABLE IF NOT EXISTS green (
+                  uuid VARCHAR(8) PRIMARY KEY,
+                  x VARCHAR(255) NOT NULL,
+                  y DOUBLE NOT NULL
+              );
+
+              CREATE TABLE IF NOT EXISTS red (
+                  uuid VARCHAR(8) PRIMARY KEY,
+                  name VARCHAR(255) NOT NULL
+              );' > /home/ec2-user/day1_table_v1.sql
+
+              sudo dnf install mariadb105 -yq
+
+              sleep 300
+              
+              mysql -u ${RdsUsername} -p'${RdsPassword}' -h ${RdsCluster.Endpoint.Address} -P 10101 ${RdsDatabase} < /home/ec2-user/day1_table_v1.sql
+              mysql -u ${RdsUsername} -p'${RdsPassword}' -h ${RdsCluster.Endpoint.Address} -P 10101 ${RdsDatabase} -e "SHOW TABLES;"
+              
+              EOF
+
+  HubNlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ws25-hub-nlb
+      Subnets:
+        - !Ref VpcAPublicSubnetA
+        - !Ref VpcAPublicSubnetC
+      SecurityGroups:
+        - !Ref HubNlbSecurityGroup
+      Scheme: internet-facing
+      Type: network
+  HubNlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: hub-nlb-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt VpcA.DefaultSecurityGroup
+        - IpProtocol: TCP
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VpcA
+  HubNlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref HubNlb
+      Port: 80
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref HubNlbTargetGroup
+  HubNlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ws25-hub-nlb-tg
+      Port: 80
+      Protocol: TCP
+      TargetType: ip
+      VpcId: !GetAtt VpcA.VpcId
+      TargetGroupAttributes:
+        - Key: "deregistration_delay.timeout_seconds"
+          Value: "30"
+  
+  AppNlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ws25-app-nlb
+      Subnets:
+        - !Ref VpcBPrivateSubnetA
+        - !Ref VpcBPrivateSubnetB
+        - !Ref VpcBPrivateSubnetC
+      SecurityGroups:
+        - !Ref AppNlbSecurityGroup
+      Scheme: internal
+      Type: network
+  AppNlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: app-nlb-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt VpcB.DefaultSecurityGroup
+        - IpProtocol: TCP
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref HubNlbSecurityGroup
+      VpcId: !Ref VpcB
+  AppNlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref AppNlb
+      Port: 80
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppNlbTargetGroup
+  AppNlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ws25-app-nlb-tg
+      Port: 80
+      Protocol: TCP
+      TargetType: alb
+      VpcId: !GetAtt VpcB.VpcId
+      HealthCheckPath: /health
+      Targets:
+        - Id: !GetAtt AppAlb.LoadBalancerArn
+          Port: 80
+
+  ########################################
+  ##########     CodeSuite      ##########
+  ########################################
+  GreenSourceS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "ws25-cd-green-artifact-${RandomNumber}"
+      VersioningConfiguration:
+        Status: Enabled
+  RedSourceS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "ws25-cd-red-artifact-${RandomNumber}"
+      VersioningConfiguration:
+        Status: Enabled
+  GreenCodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: ws25-cd-green-app
+      ComputePlatform: ECS
+  GreenCodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref GreenCodeDeployApplication
+      AutoRollbackConfiguration: 
+        Enabled: True
+        Events: 
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+          - DEPLOYMENT_STOP_ON_REQUEST
+      DeploymentGroupName: ws25-cd-green-dg
+      ServiceRoleArn: !GetAtt CodeDeployIamRole.Arn
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentStyle:
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+        DeploymentType: BLUE_GREEN
+      ECSServices:
+        - ClusterName: !Ref EcsCluster
+          ServiceName: !GetAtt GreenService.Name
+      LoadBalancerInfo: 
+        TargetGroupPairInfoList:
+          - ProdTrafficRoute:
+              ListenerArns:
+                - !GetAtt AppAlbListener.ListenerArn
+            TargetGroups:
+              - Name: !GetAtt GreenTargetGroupBlue.TargetGroupName
+              - Name: !GetAtt GreenTargetGroupGreen.TargetGroupName
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption: 
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+        TerminateBlueInstancesOnDeploymentSuccess: 
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: 0
+  CodeDeployIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codedeploy.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
+      RoleName: CodeDeployRole
+  GreenCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: ws25-cd-green-pipeline
+      PipelineType: V2
+      ArtifactStore:
+        Location: !Ref GreenCodePipelineArtifactStoreS3Bucket
+        Type: S3
+      RoleArn: !GetAtt CodePipelineIamRole.Arn
+      ExecutionMode: QUEUED
+      Stages: 
+        - Name: Source
+          Actions: 
+            - Name: SourceAction
+              ActionTypeId: 
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: 1
+              Configuration:
+                S3Bucket: !Ref GreenSourceS3Bucket
+                S3ObjectKey: artifact.zip
+                PollForSourceChanges: 'false'
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Deploy
+          Actions: 
+            - Name: DeployAction
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeployToECS
+                Version: 1
+              Configuration:
+                ApplicationName: !Ref GreenCodeDeployApplication
+                DeploymentGroupName: !Ref GreenCodeDeployDeploymentGroup
+                Image1ArtifactName: SourceOutput
+                Image1ContainerName: IMAGE1_NAME
+                TaskDefinitionTemplateArtifact: SourceOutput
+                TaskDefinitionTemplatePath: taskdef.json
+                AppSpecTemplateArtifact: SourceOutput
+                AppSpecTemplatePath: appspec.yaml
+              InputArtifacts:
+                - Name: SourceOutput
+  GreenCodePipelineArtifactStoreS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+  RedCodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: ws25-cd-red-app
+      ComputePlatform: ECS
+  RedCodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref RedCodeDeployApplication
+      AutoRollbackConfiguration: 
+        Enabled: True
+        Events: 
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+          - DEPLOYMENT_STOP_ON_REQUEST
+      DeploymentGroupName: ws25-cd-red-dg
+      ServiceRoleArn: !GetAtt CodeDeployIamRole.Arn
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentStyle:
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+        DeploymentType: BLUE_GREEN
+      ECSServices:
+        - ClusterName: !Ref EcsCluster
+          ServiceName: !GetAtt RedService.Name
+      LoadBalancerInfo: 
+        TargetGroupPairInfoList:
+          - ProdTrafficRoute:
+              ListenerArns:
+                - !GetAtt AppAlbListener.ListenerArn
+            TargetGroups:
+              - Name: !GetAtt RedTargetGroupBlue.TargetGroupName
+              - Name: !GetAtt RedTargetGroupGreen.TargetGroupName
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption: 
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+        TerminateBlueInstancesOnDeploymentSuccess: 
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: 0
+  RedCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: ws25-cd-red-pipeline
+      PipelineType: V2
+      ArtifactStore:
+        Location: !Ref RedCodePipelineArtifactStoreS3Bucket
+        Type: S3
+      RoleArn: !GetAtt CodePipelineIamRole.Arn
+      ExecutionMode: QUEUED
+      Stages: 
+        - Name: Source
+          Actions: 
+            - Name: SourceAction
+              ActionTypeId: 
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: 1
+              Configuration:
+                S3Bucket: !Ref RedSourceS3Bucket
+                S3ObjectKey: artifact.zip
+                PollForSourceChanges: 'false'
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Deploy
+          Actions: 
+            - Name: DeployAction
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeployToECS
+                Version: 1
+              Configuration:
+                ApplicationName: !Ref RedCodeDeployApplication
+                DeploymentGroupName: !Ref RedCodeDeployDeploymentGroup
+                Image1ArtifactName: SourceOutput
+                Image1ContainerName: IMAGE1_NAME
+                TaskDefinitionTemplateArtifact: SourceOutput
+                TaskDefinitionTemplatePath: taskdef.json
+                AppSpecTemplateArtifact: SourceOutput
+                AppSpecTemplatePath: appspec.yaml
+              InputArtifacts:
+                - Name: SourceOutput
+  RedCodePipelineArtifactStoreS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+  CodePipelineIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                  - s3:*
+                  - codebuild:*
+                  - codedeploy:*
+                  - ecs:RegisterTaskDefinition
+                  - iam:PassRole
+                Resource: "*"
+      RoleName: CodePipelineRole
+  
+  GreenCloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: >-
+        CodePipeline Source Stage에서 변경이 발생하면 파이프라인을 자동으로 시작하는 Amazon CloudWatch Events 규칙입니다. 
+        이 규칙을 삭제하면 해당 파이프라인에서 변경 사항이 감지되지 않습니다. 
+        자세한 정보 : http://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-about-starting.html
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - s3.amazonaws.com
+          eventName:
+            - CopyObject
+            - PutObject
+            - CompleteMultipartUpload
+          requestParameters:
+            bucketName:
+              - !Ref GreenSourceS3Bucket
+            key:
+              - artifact.zip
+      Name: green-codepipeline-event-rule
+      State: ENABLED
+      Targets:
+        - Id: green-codepipeline
+          Arn: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:ws25-cd-green-pipeline"
+          RoleArn: !GetAtt CloudWatchEventRuleIamRole.Arn
+  RedCloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: >-
+        CodePipeline Source Stage에서 변경이 발생하면 파이프라인을 자동으로 시작하는 Amazon CloudWatch Events 규칙입니다. 
+        이 규칙을 삭제하면 해당 파이프라인에서 변경 사항이 감지되지 않습니다. 
+        자세한 정보 : http://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-about-starting.html
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - s3.amazonaws.com
+          eventName:
+            - CopyObject
+            - PutObject
+            - CompleteMultipartUpload
+          requestParameters:
+            bucketName:
+              - !Ref RedSourceS3Bucket
+            key:
+              - artifact.zip
+      Name: red-codepipeline-event-rule
+      State: ENABLED
+      Targets:
+        - Id: red-codepipeline
+          Arn: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:ws25-cd-red-pipeline"
+          RoleArn: !GetAtt CloudWatchEventRuleIamRole.Arn
+  CloudWatchEventRuleIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CloudWatchEventRulePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource: "*"
+      RoleName: CloudWatchEventRuleRole
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName: codepipeline-source-trail
+      EventSelectors: 
+        - DataResources: 
+            - Type: AWS::S3::Object
+              Values: 
+                - !Sub "${GreenSourceS3Bucket.Arn}/artifact.zip"
+                - !Sub "${RedSourceS3Bucket.Arn}/artifact.zip"
+          ReadWriteType: WriteOnly
+      IsLogging: true
+      S3BucketName: !Ref CloudTrailLogsBucket
+  CloudTrailLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+  CloudTrailLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action:
+              - 's3:GetBucketAcl'
+            Effect: Allow
+            Resource: !GetAtt CloudTrailLogsBucket.Arn
+            Principal:
+              Service: 'cloudtrail.amazonaws.com'
+            Condition:
+              StringEquals:
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/codepipeline-source-trail'
+          - Action:
+              - 's3:PutObject'
+            Effect: 'Allow'
+            Resource: !Sub
+              - '${BucketArn}/AWSLogs/${AWS::AccountId}/*'
+              - BucketArn: !GetAtt CloudTrailLogsBucket.Arn
+            Principal:
+              Service: 'cloudtrail.amazonaws.com'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/codepipeline-source-trail'
+
+  CloudWatchDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: ws25-metrics
+      DashboardBody: !Sub |
+        {
+            "widgets": [
+                {
+                    "type": "metric",
+                    "x": 12,
+                    "y": 6,
+                    "width": 6,
+                    "height": 6,
+                    "properties": {
+                        "metrics": [
+                            [ "AWS/ApplicationELB", "HTTPCode_ELB_4XX_Count", "LoadBalancer", "${AppAlb.LoadBalancerFullName}", { "region": "${AWS::Region}" } ],
+                            [ "AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${AppAlb.LoadBalancerFullName}", { "region": "${AWS::Region}" } ]
+                        ],
+                        "title": "HTTPCode_ELB_4XX_Count, HTTPCode_ELB_5XX_Count",
+                        "region": "${AWS::Region}",
+                        "period": 60,
+                        "stat": "Sum"
+                    }
+                },
+                {
+                    "type": "metric",
+                    "x": 18,
+                    "y": 0,
+                    "width": 6,
+                    "height": 6,
+                    "properties": {
+                        "region": "${AWS::Region}",
+                        "title": "Top 서비스 per CPU 사용률",
+                        "legend": {
+                            "position": "right"
+                        },
+                        "timezone": "LOCAL",
+                        "metrics": [
+                            [ { "expression": "SELECT AVG(CPUUtilization) FROM SCHEMA(\"AWS/ECS\", ClusterName, ServiceName)  GROUP BY ClusterName, ServiceName ORDER BY AVG() DESC LIMIT 10" } ]
+                        ],
+                        "liveData": false,
+                        "period": 60,
+                        "annotations": {
+                            "horizontal": [
+                                {
+                                    "value": 80,
+                                    "label": "High Utilization >="
+                                }
+                            ]
+                        },
+                        "yAxis": {
+                            "left": {
+                                "min": 0,
+                                "showUnits": false
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "metric",
+                    "x": 0,
+                    "y": 6,
+                    "width": 6,
+                    "height": 6,
+                    "properties": {
+                        "region": "${AWS::Region}",
+                        "title": "Top 작업 per CPU 사용률",
+                        "legend": {
+                            "position": "right"
+                        },
+                        "timezone": "LOCAL",
+                        "metrics": [
+                            [ { "expression": "SELECT MAX(TaskCpuUtilization) FROM SCHEMA(\"ECS/ContainerInsights\", ClusterName, TaskDefinitionFamily, TaskId)  GROUP BY ClusterName, TaskDefinitionFamily, TaskId ORDER BY MAX() DESC LIMIT 10" } ]
+                        ],
+                        "liveData": false,
+                        "period": 60,
+                        "yAxis": {
+                            "left": {
+                                "min": 0,
+                                "showUnits": false
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "metric",
+                    "x": 6,
+                    "y": 6,
+                    "width": 6,
+                    "height": 6,
+                    "properties": {
+                        "region": "${AWS::Region}",
+                        "title": "Top 컨테이너 per CPU 사용률",
+                        "legend": {
+                            "position": "right"
+                        },
+                        "timezone": "LOCAL",
+                        "metrics": [
+                            [ { "expression": "SELECT MAX(ContainerCpuUtilization) FROM SCHEMA(\"ECS/ContainerInsights\", ClusterName, TaskDefinitionFamily, TaskId, ContainerName)  GROUP BY ClusterName, TaskDefinitionFamily, TaskId, ContainerName ORDER BY MAX() DESC LIMIT 10" } ]
+                        ],
+                        "liveData": false,
+                        "period": 60,
+                        "yAxis": {
+                            "left": {
+                                "min": 0,
+                                "showUnits": false
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "log",
+                    "x": 12,
+                    "y": 0,
+                    "width": 6,
+                    "height": 6,
+                    "properties": {
+                        "query": "SOURCE '/ws25/logs/red' | fields @message, @timestamp\n| stats \nsum(if(@message like /GET \\/red/, 1, 0)) as get_red,\nsum(if(@message like /POST \\/red/, 1, 0)) as post_red\nby bin(1m)",
+                        "region": "${AWS::Region}",
+                        "stacked": false,
+                        "title": "GET /red, POST /red",
+                        "view": "timeSeries"
+                    }
+                },
+                {
+                    "type": "log",
+                    "x": 6,
+                    "y": 0,
+                    "width": 6,
+                    "height": 6,
+                    "properties": {
+                        "query": "SOURCE '/ws25/logs/green' | fields @message, @timestamp\n| stats \nsum(if(@message like /GET \\/green/, 1, 0)) as get_green,\nsum(if(@message like /POST \\/green/, 1, 0)) as post_green\nby bin(1m)",
+                        "region": "${AWS::Region}",
+                        "stacked": false,
+                        "title": "GET /green, POST /green",
+                        "view": "timeSeries"
+                    }
+                },
+                {
+                    "type": "log",
+                    "x": 0,
+                    "y": 0,
+                    "width": 6,
+                    "height": 6,
+                    "properties": {
+                        "query": "SOURCE '/ws25/flow/app' | SOURCE '/ws25/flow/hub' | fields @message, @timestamp, @LogGroup\n| filter @message like /ACCEPT/\n| stats \nsum(if(@log = \"463470958750:/ws25/flow/hub\" , 1, 0)) as ws25_hub_vpc_accpet,\nsum(if(@log = \"463470958750:/ws25/flow/app\", 1, 0)) as ws25_app_vpc_accept\nby bin(1m)",
+                        "region": "${AWS::Region}",
+                        "stacked": false,
+                        "title": "ws25-hub-vpc, ws25-app-vpc",
+                        "view": "timeSeries"
+                    }
+                }
+            ]
+        }
+  AppAlb4xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ws25-app-alb-4xx-alarm
+      AlarmDescription: 5분 내 4xx 10건 이상 발생 시 알람
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_4XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt AppAlb.LoadBalancerFullName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+  AppAlb5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ws25-app-alb-5xx-alarm
+      AlarmDescription: 5분 내 5xx 5건 이상 발생 시 알람
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt AppAlb.LoadBalancerFullName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+
+# export TARGETGROUP_ARN=""
+# export NLB_NAME="ws25-app-nlb"
+# export NLB_PRIVATE_IPS=$(aws ec2 describe-network-interfaces --filters Name=description,Values="ELB net/$NLB_NAME/*" --query 'NetworkInterfaces[*].PrivateIpAddresses[*].PrivateIpAddress' --output text | sort -t '.' -k1,1nr -k2,2nr -k3,3nr -k4,4nr)
+# export AZS=("c" "b" "a")
+# INDEX=0
+# TARGETS=""
+# for IP in $NLB_PRIVATE_IPS; do
+#   AZ="${AZS[$INDEX]}"
+#   TARGETS+=" Id=$IP,AvailabilityZone=ap-northeast-2$AZ"
+#   ((INDEX=(INDEX+1)))
+# done
+# aws elbv2 register-targets --target-group-arn $TARGETGROUP_ARN --targets $TARGETS
+
+# export NLB="ws25-hub-nlb-9d46941a985d2716.elb.ap-northeast-2.amazonaws.com"
+# curl -s -o /dev/null -w '%{http_code}\n' http://${NLB}/error; curl -s http://${NLB}/error; 
+# curl -o /dev/null -s -w "%{http_code}\n" http://${NLB}/green
+# curl -o /dev/null -s -w "%{http_code}\n" http://${NLB}/red
+# curl --silent -X POST -H "Content-Type: application/json" -d '{"x": "eks", "y": 81}' http://${NLB}/green
+# curl --silent http://${NLB}/green?id=아이디입력
+# curl --silent -X POST -H "Content-Type: application/json" -d '{"name":"kubectl"}' http://${NLB}/red
+# curl --silent http://${NLB}/red?id=아이디입력
+# for i in {1..10}; do curl -s -o /dev/null -w "%{http_code}\n" "http://${NLB}/4xx"; done
+# for i in {1..5}; do curl -s -o /dev/null -w "%{http_code}\n" "http://${NLB}/error"; done
+# curl --silent -X POST -H "Content-Type: application/json" -d '{"x": "test", "y": 111}' http://${NLB}/green
+# curl http://${NLB}/green?id=아이디입력
+# curl --silent -X POST -H "Content-Type: application/json" -d '{"name":"test2"}' http://${NLB}/red
+# curl http://${NLB}/red?id=아이디입력
+# for i in {1..10}; do curl -s -o /dev/null -w "%{http_code}\n" "http://${NLB}/4xx"; sleep 1; done
+# for i in {1..5}; do curl -s -o /dev/null -w "%{http_code}\n" "http://${NLB}/error"; sleep 1; done

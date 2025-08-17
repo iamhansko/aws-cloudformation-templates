@@ -1,0 +1,391 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Secure Networking (ap-northeast-3)
+
+Parameters:
+  AmazonLinux2023AmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+
+Resources:
+  EgressVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: egress-vpc }]
+  EgressPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref EgressVpc
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Sub ${AWS::Region}a
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: egress-public-sn-a }]
+  EgressPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref EgressVpc
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Sub ${AWS::Region}b
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: egress-public-sn-b }]
+  EgressPeeringSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref EgressVpc
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Tags: [{ Key: Name, Value: egress-peering-sn-a }]
+  EgressPeeringSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref EgressVpc
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Sub ${AWS::Region}b
+      Tags: [{ Key: Name, Value: egress-peering-sn-b }]
+  EgressFirewallSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref EgressVpc
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Tags: [{ Key: Name, Value: egress-firewall-sn-a }]
+  EgressFirewallSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref EgressVpc
+      CidrBlock: 10.0.5.0/24
+      AvailabilityZone: !Sub ${AWS::Region}b
+      Tags: [{ Key: Name, Value: egress-firewall-sn-b }]
+
+  EgressIgw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: egress-igw }]
+  EgressIgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref EgressVpc
+      InternetGatewayId: !Ref EgressIgw
+  EgressPublicRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref EgressVpc
+      Tags:
+        - Key: Name
+          Value: egress-public-rt
+  EgressPublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref EgressPublicRt
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref EgressIgw
+  EgressPublicToTgwRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - EgressVpcTgwAttachment
+    Properties:
+      RouteTableId: !Ref EgressPublicRt
+      DestinationCidrBlock: !GetAtt AppVpc.CidrBlock
+      TransitGatewayId: !Ref Tgw
+  EgressPublicSubnetARtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref EgressPublicSubnetA
+      RouteTableId: !Ref EgressPublicRt
+  EgressPublicSubnetBRtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref EgressPublicSubnetB
+      RouteTableId: !Ref EgressPublicRt
+  EgressVpcNatgwAElasticIp:
+    Type: AWS::EC2::EIP
+  EgressVpcBNatgwA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EgressVpcNatgwAElasticIp.AllocationId
+      SubnetId: !Ref EgressPublicSubnetA
+      Tags:
+        - Key: Name
+          Value: egress-natgw-a
+  EgressVpcPrivARt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: egress-priv-rt-a
+      VpcId: !Ref EgressVpc
+  EgressVpcPrivARtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref EgressVpcPrivARt
+      SubnetId: !Ref EgressPeeringSubnetA
+  EgressPrivateSubnetARoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref EgressVpcBNatgwA
+      RouteTableId: !Ref EgressVpcPrivARt
+  EgressVpcNatgwBElasticIp:
+    Type: AWS::EC2::EIP
+  EgressVpcBNatgwB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EgressVpcNatgwBElasticIp.AllocationId
+      SubnetId: !Ref EgressPublicSubnetB
+      Tags:
+        - Key: Name
+          Value: egress-natgw-b
+  EgressVpcPrivBRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: egress-priv-rt-b
+      VpcId: !Ref EgressVpc
+  EgressVpcPrivBRtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref EgressVpcPrivBRt
+      SubnetId: !Ref EgressPeeringSubnetB
+  EgressPrivateSubnetBRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref EgressVpcBNatgwB
+      RouteTableId: !Ref EgressVpcPrivBRt
+
+  AppVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.16.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: app-vpc }]
+  AppPrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref AppVpc
+      CidrBlock: 172.16.0.0/24
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Tags: [{ Key: Name, Value: app-private-sn-a }]
+  AppPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref AppVpc
+      CidrBlock: 172.16.1.0/24
+      AvailabilityZone: !Sub ${AWS::Region}b
+      Tags: [{ Key: Name, Value: app-private-sn-b }]
+  AppRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref AppVpc
+      Tags:
+        - Key: Name
+          Value: app-rt
+  AppToTgwRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - AppVpcTgwAttachment
+    Properties:
+      RouteTableId: !Ref AppRt
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayId: !Ref Tgw
+  AppPrivateSubnetARtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppPrivateSubnetA
+      RouteTableId: !Ref AppRt
+  AppPrivateSubnetBRtAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppPrivateSubnetB
+      RouteTableId: !Ref AppRt
+  
+  # https://docs.aws.amazon.com/ko_kr/vpc/latest/tgw/how-transit-gateways-work.html#TGW_Scenarios
+  Tgw:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      DefaultRouteTableAssociation: enable
+      DefaultRouteTablePropagation: enable
+      AutoAcceptSharedAttachments: enable
+      DnsSupport: enable
+      VpnEcmpSupport: enable
+  EgressVpcTgwAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref Tgw
+      VpcId: !Ref EgressVpc
+      SubnetIds:
+        - !Ref EgressPeeringSubnetA
+        - !Ref EgressPeeringSubnetB
+      Tags: [{Key: Name, Value: tgw-egress}]
+  AppVpcTgwAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref Tgw
+      VpcId: !Ref AppVpc
+      SubnetIds:
+        - !Ref AppPrivateSubnetA
+        - !Ref AppPrivateSubnetB
+      Tags: [{Key: Name, Value: tgw-app}]
+  TgwStaticRoute:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayAttachmentId: !Ref EgressVpcTgwAttachment
+      TransitGatewayRouteTableId: !GetAtt TgwDefaultRouteTable.DefaultRouteTableId
+
+  NetworkFirewall:
+    Type: AWS::NetworkFirewall::Firewall
+    Properties:
+      FirewallName: firewall
+      FirewallPolicyArn: !Ref FirewallPolicy
+      VpcId: !Ref EgressVpc
+      SubnetMappings:
+        - SubnetId: !Ref EgressFirewallSubnetA
+        - SubnetId: !Ref EgressFirewallSubnetB
+      DeleteProtection: false
+      SubnetChangeProtection: false
+      FirewallPolicyChangeProtection: false
+  FirewallPolicy:
+    Type: AWS::NetworkFirewall::FirewallPolicy
+    Properties:
+      FirewallPolicyName: firewall-policy
+      FirewallPolicy:
+        StatelessRuleGroupReferences:
+          - ResourceArn: !GetAtt FirewallStatelessICMPBlock.RuleGroupArn
+            Priority: 1
+        StatefulRuleGroupReferences:
+          - ResourceArn: !GetAtt FirewallStatefulDNSBlock.RuleGroupArn
+        StatelessDefaultActions: ["aws:forward_to_sfe"]
+        StatelessFragmentDefaultActions: ["aws:forward_to_sfe"]
+  FirewallStatelessICMPBlock:
+    Type: AWS::NetworkFirewall::RuleGroup
+    Properties:
+      Capacity: 100
+      RuleGroupName: icmp-block-stateless
+      Type: STATELESS
+      RuleGroup:
+        RulesSource:
+          StatelessRulesAndCustomActions:
+            StatelessRules:
+              - RuleDefinition:
+                  MatchAttributes:
+                    Sources: [{ AddressDefinition: "0.0.0.0/0" }]
+                    Destinations: [{ AddressDefinition: "0.0.0.0/0" }]
+                    Protocols: [1] # ICMP
+                  Actions: ["aws:drop"]
+                Priority: 1
+  FirewallStatefulDNSBlock:
+    Type: AWS::NetworkFirewall::RuleGroup
+    Properties:
+      Capacity: 100
+      RuleGroupName: dns-block-stateful
+      Type: STATEFUL
+      RuleGroup:
+        RulesSource:
+          RulesString: |
+            drop udp any any -> any 53 (msg:"Drop DNS UDP egress"; sid:1000001;)
+            drop tcp any any -> any 53 (msg:"Drop DNS TCP egress"; sid:1000002;)
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT2M
+    DependsOn:
+      - TgwStaticRoute
+    Properties:
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      ImageId: !Ref AmazonLinux2023AmiId
+      SubnetId: !Ref AppPrivateSubnetA
+      SecurityGroupIds: [!GetAtt AppVpc.DefaultSecurityGroup]
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      Tags: [{ Key: Name, Value: app-bastion }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq bind-utils
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref BastionEc2IamRole]
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+
+  TgwDefaultRouteTable:
+    Type: Custom::TransitGatewayRouteTable
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambdaFunction.Arn
+      TransitGatewayId: !Ref Tgw
+  CustomResourceLambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TransitGatewayDescribePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:*
+                Resource: "*"
+  CustomResourceLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomResourceLambdaIamRole.Arn
+      Runtime: python3.13
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          def lambda_handler(event, context):
+            try:
+              ec2 = boto3.client("ec2")
+              tgw_id = event["ResourceProperties"]["TransitGatewayId"]
+              tgw_data = ec2.describe_transit_gateways(TransitGatewayIds=[tgw_id])
+              tgw_default_rt_id = None
+              if tgw_data["TransitGateways"]:
+                options = tgw_data["TransitGateways"][0].get("Options", {})
+                tgw_default_rt_id = options.get("AssociationDefaultRouteTableId", None)
+              if not tgw_default_rt_id:
+                raise Exception("TransitGateway DefaultRouteTableId Not Found")
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {"DefaultRouteTableId": tgw_default_rt_id})
+            except Exception as e:
+              cfnresponse.send(event, context, cfnresponse.FAILED, {"Message": str(e)})
