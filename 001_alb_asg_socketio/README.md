@@ -1,8 +1,9 @@
-# Multiplayer Game (NLB + Socket.IO)
+# Multiplayer Game (ALB + Socket.IO)
 
 (5+ min deployment)
 
 ## Architecture
+
 <img src="assets/arch.png" width="600px" alt="architecture" style="background-color:#ffffff;">
 
 ## Preview

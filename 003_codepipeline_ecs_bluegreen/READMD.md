@@ -1,2 +1,0 @@
-# ECS Cluster (Basic)
-

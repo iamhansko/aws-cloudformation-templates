@@ -1,8 +1,13 @@
 # IAM Role
 
+## Architecture
+<img src="assets/arch.png" width="300px">
+
+## Notes
+
 YAML / JSON / String
 
-### Trust Relationships
+#### Trust Relationships
 ```
 {
     "Version": "2012-10-17",
@@ -18,7 +23,7 @@ YAML / JSON / String
 }
 ```
 
-### Permissions
+#### Permissions
 ```
 {
     "Version": "2012-10-17",

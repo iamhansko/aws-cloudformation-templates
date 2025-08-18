@@ -1,4 +1,4 @@
-# VPC / Public Subnets / Private Subnets
+# VPC Peering + ECS Cluster + CodeDeploy BlueGreen
 
 ## Architecture
 <img src="assets/arch.png" width="600px">

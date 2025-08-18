@@ -1,5 +1,15 @@
 # EKS Cluster - Custom Managed Node Group (MNG)
 
+## Architecture
+[Kubernetes]
+
+<img src="assets/k8s.png">
+
+## Preview
+<img src="assets/test.gif">
+
+## Notes
+
 Custom Launch Template
 - AMI (optional)
 - InstanceType (optional)
