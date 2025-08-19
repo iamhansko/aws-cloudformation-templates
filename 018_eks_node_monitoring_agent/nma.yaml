@@ -178,6 +178,106 @@ Resources:
           systemctl start code-server
 
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+
+          dnf install -yq git
+          dnf install -yq docker
+          dnf install -yq bash-completion
+          systemctl enable --now docker
+          # usermod -aG docker ec2-user
+          # newgrp docker
+          chmod 666 /var/run/docker.sock
+
+          su - ec2-user << 'EOF'
+          export HOME=/home/ec2-user
+          cd $HOME
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.0/2025-05-01/bin/linux/amd64/kubectl
+          chmod +x ./kubectl
+          mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$HOME/bin:$PATH
+          echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
+          echo 'source /usr/share/bash-completion/bash_completion' >> ~/.bashrc
+          echo 'source <(kubectl completion bash)' >> ~/.bashrc
+          echo 'alias k=kubectl' >> ~/.bashrc
+          echo 'complete -o default -F __start_kubectl k' >> ~/.bashrc
+
+          curl -sLO "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz"
+          tar -xzf eksctl_$(uname -s)_amd64.tar.gz -C /tmp && rm eksctl_$(uname -s)_amd64.tar.gz
+          sudo install -m 0755 /tmp/eksctl /usr/local/bin && rm /tmp/eksctl
+
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          ./get_helm.sh
+
+          mkdir -p /home/ec2-user/manifests
+          echo 'apiVersion: karpenter.sh/v1
+          kind: NodePool
+          metadata:
+            name: default
+          spec:
+            template:
+              spec:
+                nodeClassRef:
+                  group: karpenter.k8s.aws
+                  kind: EC2NodeClass
+                  name: default
+                requirements:
+                  - key: "karpenter.k8s.aws/instance-family"
+                    operator: In
+                    values: ["t3"]
+                  - key: "karpenter.k8s.aws/instance-cpu"
+                    operator: Gt
+                    values: ["1"]
+                  - key: "karpenter.k8s.aws/instance-memory"
+                    operator: Gt
+                    values: ["2048"]
+                  - key: "kubernetes.io/arch"
+                    operator: In
+                    values: ["amd64"]
+                  - key: "karpenter.sh/capacity-type"
+                    operator: In
+                    values: ["on-demand"]
+                  - key: "karpenter-nodepool"
+                    operator: Exists
+          ---
+          apiVersion: karpenter.k8s.aws/v1
+          kind: EC2NodeClass
+          metadata:
+            name: default
+          spec:
+            subnetSelectorTerms:
+              - id: ${PrivateSubneta}
+              - id: ${PrivateSubnetb}
+            securityGroupSelectorTerms:
+              - id: ${EksClusterSecurityGroup.GroupId}
+            role: ${KarpenterNodeIamRole}
+            amiSelectorTerms:
+              - alias: al2023@latest
+            userData: |
+              #!/bin/bash
+              timedatectl set-timezone Asia/Seoul
+            tags:
+              Name: Karpenter-Node' > /home/ec2-user/manifests/nodepool.yaml
+          echo 'apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            labels:
+              app: nginx
+            name: nginx
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: nginx
+            template:
+              metadata:
+                labels:
+                  app: nginx
+              spec:
+                nodeSelector:
+                  karpenter-nodepool: deafult
+                containers:
+                - image: nginx
+                  name: nginx' > /home/ec2-user/manifests/deployment.yaml
+          EOF
   BastionEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -296,6 +396,95 @@ Resources:
           ClusterName: !Ref 
             Fn::Sub: ${Name}EksCluster
           ResolveConflicts: OVERWRITE
+      ${Name}PodIdentityAgentAddon:
+        Type: AWS::EKS::Addon
+        Properties:
+          AddonName: eks-pod-identity-agent
+          ClusterName: !Ref 
+            Fn::Sub: ${Name}EksCluster
+          ResolveConflicts: OVERWRITE
+      ${Name}CloudWatchObservabilityAddon:
+        Type: AWS::EKS::Addon
+        DependsOn:
+          - !Sub ${Name}PodIdentityAgentAddon
+        Properties:
+          AddonName: amazon-cloudwatch-observability
+          ClusterName: !Ref 
+            Fn::Sub: ${Name}EksCluster
+          ResolveConflicts: OVERWRITE
+          PodIdentityAssociations:
+            - RoleArn: !GetAtt CloudWatchObservabilityIamRole.Arn
+              ServiceAccount: cloudwatch-agent
+          ConfigurationValues: |
+            containerLogs:
+              fluentBit:
+                config:
+                  extraFiles:
+                    application-log.conf: ""
+                    dataplane-log.conf: ""
+                    node-monitoring-agent.conf: |
+                      [INPUT]
+                        Name                tail
+                        Tag                 node-monitoring-agent.*
+                        Path                /var/log/containers/eks-node-monitoring-agent-*_kube-system_*.log
+                        multiline.parser    docker, cri
+                        DB                  /var/fluent-bit/state/flb-node-monitoring-agent.db
+                        Mem_Buf_Limit       50MB
+                        Skip_Long_Lines     On
+                        Refresh_Interval    10
+                        Rotate_Wait         30
+                        storage.type        filesystem
+                        Read_from_Head      ${READ_FROM_HEAD}
+
+                      [FILTER]
+                        Name                kubernetes
+                        Match               node-monitoring-agent.*
+                        Kube_Tag_Prefix     node-monitoring-agent.var.log.containers.
+                        Kube_URL            https://kubernetes.default.svc:443
+                        Merge_Log           On
+                        Merge_Log_Key       log_processed
+                        K8S-Logging.Parser  On
+                        K8S-Logging.Exclude Off
+                        Labels              Off
+                        Annotations         Off
+                        Use_Kubelet         On
+                        Kubelet_Port        10250
+                        Buffer_Size         0
+                        Use_Pod_Association On
+                      
+                      [FILTER]
+                        Name                nest
+                        Match               node-monitoring-agent.*
+                        Operation           lift
+                        Nested_under        kubernetes
+                      
+                      [FILTER]
+                        Name                modify
+                        Match               node-monitoring-agent.*
+                        Rename              pod_name pod
+                        Rename              container_name container
+                        Rename              namespace_name namespace
+                        Rename              host node
+                      
+                      [FILTER]
+                        Name                record_modifier
+                        Match               node-monitoring-agent.*
+                        Allowlist_key       log
+                        Allowlist_key       pod
+                        Allowlist_key       container
+                        Allowlist_key       namespace
+                        Allowlist_key       node
+
+                      [OUTPUT]
+                        Name                cloudwatch_logs
+                        Match               node-monitoring-agent.*
+                        region              ${AWS_REGION}
+                        log_group_name      /aws/eks/${CLUSTER_NAME}/node-monitoring-agent
+                        log_stream_prefix   node-monitoring-agent-
+                        log_stream_template $pod.FROM.${HOST_NAME}
+                        auto_create_group   true
+                        extra_user_agent    container-insights
+                        add_entity          true
       ${Name}NodeMonitoringAgentAddon:
         Type: AWS::EKS::Addon
         Properties:
@@ -314,9 +503,9 @@ Resources:
           CapacityType: ON_DEMAND # SPOT | CAPACITY_BLOCK
           NodeRole: !GetAtt EksNodeIamRole.Arn
           ScalingConfig: 
-            MinSize: 2
-            DesiredSize: 2
-            MaxSize: 2
+            MinSize: 3
+            DesiredSize: 3
+            MaxSize: 3
           Subnets: 
             - !Ref PrivateSubneta
             - !Ref PrivateSubnetb
@@ -380,6 +569,54 @@ Resources:
             Fn::Sub: ${Name}EksCluster
           PrincipalArn: !GetAtt KarpenterNodeIamRole.Arn
           Type: EC2_LINUX
+      ${Name}SsmAssociation:
+        Type: AWS::SSM::Association
+        Properties:
+          Name: AWS-RunShellScript
+          WaitForSuccessTimeoutSeconds: 300
+          Targets:
+            - Key: InstanceIds
+              Values:
+                - !Ref BastionEc2
+          Parameters:
+            commands: 
+              # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+              - !Sub 
+                  - |
+                    su - ec2-user << 'EOF'
+                    mkdir -p /home/ec2-user/${Name}
+                    echo '#!/bin/bash
+                    aws eks update-kubeconfig --name ${ClusterName}
+                    export KARPENTER_NAMESPACE="kube-system"
+                    export KARPENTER_VERSION="1.6.0"
+                    export K8S_VERSION="1.33"
+                    export AWS_PARTITION="aws"
+                    export CLUSTER_NAME="${ClusterName}"
+                    export AWS_DEFAULT_REGION="${AWS::Region}"
+                    export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+                    export TEMPOUT="$(mktemp)"
+                    helm registry logout public.ecr.aws
+                    helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
+                    --version "$KARPENTER_VERSION" \
+                    --namespace "$KARPENTER_NAMESPACE" --create-namespace \
+                    --set "settings.clusterName=$CLUSTER_NAME" \
+                    --set controller.resources.requests.cpu=1 \
+                    --set controller.resources.requests.memory=1Gi \
+                    --set controller.resources.limits.cpu=1 \
+                    --set controller.resources.limits.memory=1Gi \
+                    --set settings.featureGates.nodeRepair=true \
+                    --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${KarpenterControllerIamRoleArn}" \
+                    --wait' > /home/ec2-user/${Name}/install_karpenter.sh
+                    chmod +x /home/ec2-user/${Name}/install_karpenter.sh
+                    # /home/ec2-user/${Name}/install_karpenter.sh
+                    # kubectl apply -f /home/ec2-user/manifests
+                    EOF
+                  - ClusterName: !Ref 
+                      Fn::Sub: ${Name}EksCluster
+                    KarpenterControllerIamRoleArn: !GetAtt
+                      - !Sub ${Name}KarpenterControllerIamRole
+                      - Arn
+                    
   EksClusterIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -438,75 +675,21 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-  
-  # KarpenterAssociation:
-  #   Type: AWS::SSM::Association
-  #   DependsOn:
-  #     - 
-  #   Properties:
-  #     Name: AWS-RunShellScript
-  #     WaitForSuccessTimeoutSeconds: 300
-  #     Targets:
-  #       - Key: InstanceIds
-  #         Values:
-  #           - !Ref BastionEc2
-  #     Parameters:
-  #       commands: 
-  #         # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
-  #         - !Sub |
-  #             dnf install -yq git
-  #             dnf install -yq docker
-  #             dnf install -yq bash-completion
-  #             systemctl enable --now docker
-  #             # usermod -aG docker ec2-user
-  #             # newgrp docker
-  #             chmod 666 /var/run/docker.sock
-
-  #             su - ec2-user << 'EOF'
-  #             export HOME=/home/ec2-user
-  #             cd $HOME
-  #             curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.0/2025-05-01/bin/linux/amd64/kubectl
-  #             chmod +x ./kubectl
-  #             mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$HOME/bin:$PATH
-  #             echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
-  #             echo 'source /usr/share/bash-completion/bash_completion' >> ~/.bashrc
-  #             echo 'source <(kubectl completion bash)' >> ~/.bashrc
-  #             echo 'alias k=kubectl' >>~/.bashrc
-  #             echo 'complete -o default -F __start_kubectl k' >>~/.bashrc
-
-  #             ARCH=amd64
-  #             PLATFORM=$(uname -s)_$ARCH
-  #             curl -sLO "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
-  #             tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm eksctl_$PLATFORM.tar.gz
-  #             sudo install -m 0755 /tmp/eksctl /usr/local/bin && rm /tmp/eksctl
-
-  #             curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-  #             chmod 700 get_helm.sh
-  #             ./get_helm.sh
-
-  #             aws eks update-kubeconfig --name ${EksCluster}
-
-  #             echo $'#!/bin/bash
-  #             export KARPENTER_NAMESPACE="kube-system"
-  #             export KARPENTER_VERSION="1.6.0"
-  #             export K8S_VERSION="1.33"
-  #             export AWS_PARTITION="aws"
-  #             export CLUSTER_NAME="${EksCluster}"
-  #             export AWS_DEFAULT_REGION="${AWS::Region}"
-  #             export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-  #             export TEMPOUT="$(mktemp)"
-  #             helm registry logout public.ecr.aws
-  #             helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-  #             --version "$KARPENTER_VERSION" \
-  #             --namespace "$KARPENTER_NAMESPACE" --create-namespace \
-  #             --set "settings.clusterName=$CLUSTER_NAME" \
-  #             --set controller.resources.requests.cpu=1 \
-  #             --set controller.resources.requests.memory=1Gi \
-  #             --set controller.resources.limits.cpu=1 \
-  #             --set controller.resources.limits.memory=1Gi \
-  #             --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${KarpenterControllerIamRole.Arn}" \
-  #             --wait' > karpenter.sh
-  #             EOF
+  CloudWatchObservabilityIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
 
 Outputs:
   VsCode:

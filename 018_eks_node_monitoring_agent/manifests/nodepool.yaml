@@ -1,0 +1,48 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+      requirements:
+        - key: "karpenter.k8s.aws/instance-family"
+          operator: In
+          values: ["t3"]
+        - key: "karpenter.k8s.aws/instance-cpu"
+          operator: Gt
+          values: ["1"]
+        - key: "karpenter.k8s.aws/instance-memory"
+          operator: Gt
+          values: ["2048"]
+        - key: "kubernetes.io/arch"
+          operator: In
+          values: ["amd64"]
+        - key: "karpenter.sh/capacity-type"
+          operator: In
+          values: ["on-demand"]
+        - key: "karpenter-nodepool"
+          operator: Exists
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  subnetSelectorTerms:
+    - id: SUBNET_A
+    - id: SUBNET_B
+  securityGroupSelectorTerms:
+    - id: sg-0ccee4bdc02acb9d1
+  role: KARPENTER_NODE_IAM_ROLE
+  amiSelectorTerms:
+    - alias: al2023@latest
+  userData: |
+    #!/bin/bash
+    timedatectl set-timezone Asia/Seoul
+  tags:
+    Name: Karpenter-Node
