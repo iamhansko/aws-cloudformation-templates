@@ -8,6 +8,16 @@ Parameters:
   AmazonLinux2023AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+  OpenSearchMasterUserName:
+    Type: String
+    Default: admin
+    AllowedPattern: ".+"
+    ConstraintDescription: "Parameter [OpenSearchMasterUserName] is empty"
+  OpenSearchMasterUserPassword:
+    Type: String
+    Default: adminPassword1234!
+    AllowedPattern: ".+"
+    ConstraintDescription: "Parameter [OpenSearchMasterUserPassword] is empty"
 Mappings: 
   AzMapping: 
     a:
@@ -153,6 +163,10 @@ Resources:
             dnf update -yq
             dnf install -yq git
             dnf groupinstall -yq "Development Tools"
+            dnf install -yq python3.13
+            ln -sf /usr/bin/python3.13 /usr/bin/python
+            python -m ensurepip --upgrade
+            python -m pip install opensearch-py
             export VSC_VERSION="4.102.3"
             wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
             tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
@@ -184,7 +198,7 @@ Resources:
             sudo -Eu ec2-user bash << 'EOF'
             cd /home/ec2-user
             mkdir -p /home/ec2-user/bin
-            curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-05-12/bin/linux/amd64/kubectl
+            curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.3/2025-08-03/bin/linux/amd64/kubectl
             chmod +x kubectl
             mv kubectl /home/ec2-user/bin/kubectl
             export PATH=/home/ec2-user/bin:$PATH
@@ -223,7 +237,7 @@ Resources:
                   Host  ${OpenSearchDomain.DomainEndpoint}
                   Port  443
                   Index web
-                  Type  app
+                  Suppress_Type_Name On
                   AWS_Auth On
                   AWS_Region ${AWS::Region}
                   tls   On" > /home/ec2-user/manifests/configmap.yaml
@@ -250,6 +264,26 @@ Resources:
                 # Edit NGINX_POD_IP
                 command: ['sh', '-c', 'while true; do curl -s -o /dev/null -w \"%{http_code}\\n\" NGINX_POD_IP; sleep 3; done']
               restartPolicy: Always" > /home/ec2-user/manifests/stress_pod.yaml
+            echo 'from opensearchpy import OpenSearch, RequestsHttpConnection
+            HOST = "${OpenSearchDomain.DomainEndpoint}"
+            MASTER_USER = "${OpenSearchMasterUserName}"
+            MASTER_PASSWORD = "${OpenSearchMasterUserPassword}"
+            try:
+              client = OpenSearch(
+                hosts=[{"host": HOST, "port": 443}],
+                http_auth=(MASTER_USER, MASTER_PASSWORD),
+                use_ssl=True,
+                verify_certs=True,
+                connection_class=RequestsHttpConnection,
+                timeout=30
+              )
+              info = client.info()
+              print(f"Client : {info["version"]["distribution"]} {info["version"]["number"]}")
+              response = client.security.create_role_mapping(role="all_access", body={"users":["admin"], "backend_roles":["${FargatePodExecutionRole.Arn}"]})
+              print(f"Create Role Mapping : {response}")
+            except Exception as e:
+              print(f"{e}")' > /home/ec2-user/opensearch.py
+            python /home/ec2-user/opensearch.py
             EOF
 
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
@@ -363,7 +397,9 @@ Resources:
       Subnets: 
         - !Ref PrivateSubneta
         - !Ref PrivateSubnetb
-      Selectors: 
+      Selectors:
+        - Namespace: default
+        - Namespace: kube-system
         - Namespace: app-fargate
           # Labels: 
           #     - Key: String
@@ -407,8 +443,7 @@ Resources:
             Principal:
               AWS: "*"
             Action: es:ESHttp*
-            Resource: "*"
-            # Resource: !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/*
+            Resource: !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/*
       AdvancedOptions: 
         indices.fielddata.cache.size: "20"
         indices.query.bool.max_clause_count: "1024"
@@ -430,22 +465,35 @@ Resources:
         Iops: 3000
         VolumeSize: 50
         VolumeType: gp3
-      # EncryptionAtRestOptions: 
-      #   Enabled: True
-      #   KmsKeyId: 
+      EncryptionAtRestOptions: 
+        Enabled: True
+        KmsKeyId: !GetAtt OpenSearchKmsKey.KeyId
       EngineVersion: OpenSearch_2.19
       NodeToNodeEncryptionOptions: 
         Enabled: True
       SoftwareUpdateOptions: 
         AutoSoftwareUpdateEnabled: True
-      VPCOptions: 
-        SecurityGroupIds: 
-          - !GetAtt EksCluster.ClusterSecurityGroupId
-        SubnetIds: 
-          - !Ref PrivateSubneta
-
+      # VPCOptions: 
+      #   SecurityGroupIds: 
+      #     - !GetAtt EksCluster.ClusterSecurityGroupId
+      #   SubnetIds: 
+      #     - !Ref PrivateSubneta
+      AdvancedSecurityOptions:
+        Enabled: True
+        InternalUserDatabaseEnabled: True
+        MasterUserOptions: 
+          MasterUserName: !Ref OpenSearchMasterUserName
+          MasterUserPassword: !Ref OpenSearchMasterUserPassword
+  OpenSearchKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Delete
+    Properties:
+      Enabled: True
 
 Outputs:
   BastionEc2PublicIP:
     Description: "Public IP Address of the VS Code Server EC2 instance"
     Value: !Sub "http://${BastionEc2.PublicIp}:8000"
+  OpenSearchDashboard:
+    Description: "OpenSearch Domain Endpoint"
+    Value: !Sub "https://${OpenSearchDomain.DomainEndpoint}/_dashboards"
