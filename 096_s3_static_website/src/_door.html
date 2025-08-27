@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en" data-arp="">
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>STEM | AWS Korea</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com/">
+		<link rel="preconnect" href="https://fonts.gstatic.com/" crossorigin="">
+		<link rel="stylesheet" href="style.css">
+	</head>
+	<body>
+    <div id="app">
+			<main>
+				<main>
+					<div>
+						<div><a class="door_link" href="/">⇦ 되돌아가기</a></div>
+						<p class="door_title">문이 잠겨있습니다</p> 
+						<img class="door_image" src="img/lock.png" alt="lock">
+						<p class="sub_title">문을 열기 위해 올바른 비밀번호를 입력해주세요.</p> 
+						<input class="door_input">
+						<button id="password" class="door_button">입력</button>
+					</div>
+				</main>
+			</main>
+		</div>
+	</body>
+	<script>
+		async function checkPassword() {
+			const response = await fetch("data/lambda.json");
+			const json = await response.json();
+			const lambdaCall = await fetch(json.url);
+			const body = await lambdaCall.json();
+			console.log(body);
+			console.log(body.password);
+			const inputValue = document.querySelector("input").value;
+			if (body.password == inputValue) {
+				alert("문이 열렸습니다.");
+				window.location.href = "/_success.html";
+			} else {
+				alert("비밀번호가 올바르지 않습니다.");
+			}
+		}
+		document.getElementById("password").onclick = checkPassword;
+	</script>
+</html>

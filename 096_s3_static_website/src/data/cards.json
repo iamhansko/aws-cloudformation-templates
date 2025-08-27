@@ -1,0 +1,14 @@
+[
+  {
+    "img": "img/find.jpg",
+    "text": "교실 탐색",
+    "description": "classroom",
+    "link" : "/_classroom.html"
+  },
+  {
+    "img": "img/door.png",
+    "text": "출구",
+    "description": "door",
+    "link" : "/_door.html"
+  }
+]

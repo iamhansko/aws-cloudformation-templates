@@ -1,0 +1,309 @@
+Parameters:
+  AmazonLinux2023AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+  GameSourceUrl:
+    Type: String
+    Default: "https://github.com/iamhansko/escape-room-workshop/releases/download/test/game.zip"
+  GamePassword:
+    Type: String
+    Default: "988"
+    NoEcho: True
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: MyPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicGet
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub ${S3Bucket.Arn}/*
+      Bucket: !Ref S3Bucket
+  
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Backend
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaIamRole.Arn
+      Runtime: python3.13
+      Timeout: 60
+      Code:
+        ZipFile: !Sub |
+          import json
+          def lambda_handler(event, context):
+            password = "${GamePassword}"
+            return {
+              "statusCode": 200,
+              "body": json.dumps({"password": password})
+            }
+  LambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  LambdaFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      Cors: 
+        AllowOrigins: ["*"]
+      InvokeMode: BUFFERED
+      TargetFunctionArn: !GetAtt LambdaFunction.Arn
+  LambdaFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:invokeFunctionUrl
+      FunctionName: !Ref LambdaFunction
+      FunctionUrlAuthType: NONE
+      Principal: "*"
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public-subnet
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: "1"                
+        Timeout: PT10M
+    Properties:
+      ImageId: !Ref AmazonLinux2023AmiId
+      InstanceType: t3.medium
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet
+          GroupSet: 
+            - !GetAtt Vpc.DefaultSecurityGroup
+      Tags: 
+        - Key: Name
+          Value: bastion-ec2
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash
+            dnf update -yq
+            dnf install -yq git
+            dnf groupinstall -yq "Development Tools"
+            dnf install -yq python3.13
+            ln -sf /usr/bin/python3.13 /usr/bin/python
+            python -m ensurepip --upgrade
+            echo 'import boto3
+            import requests
+            import zipfile
+            import io
+            import os
+            TYPE_MAP = {
+              "html": "text/html",
+              "css": "text/css",
+              "js": "text/javascript",
+              "txt": "text/plain",
+              "sh": "text/x-sh",
+              "png": "image/png",
+              "jpg": "image/jpeg",
+              "webp": "image/webp",
+              "svg": "image/svg+xml",
+              "gif": "image/gif",
+              "json": "application/json"
+            }
+            S3_BUCKET = "${S3Bucket}"
+            SRC_URL = "${GameSourceUrl}"
+            try:
+              response = requests.get(SRC_URL)
+              response.raise_for_status()
+              s3 = boto3.client("s3")
+              with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+                for file_name in zf.namelist():
+                  if zf.getinfo(file_name).is_dir():
+                    continue
+                  file_data = zf.read(file_name)
+                  s3.put_object(
+                    Bucket=S3_BUCKET,
+                    Key=file_name,
+                    Body=file_data,
+                    ContentType=TYPE_MAP[file_name.split(".")[-1]]
+                  )
+              s3.put_object(
+                Bucket=S3_BUCKET,
+                Key="data/lambda.json",
+                Body="{\"url\" : \"${LambdaFunctionUrl.FunctionUrl}\"}",
+                ContentType="application/json"
+              )
+              hint_image = requests.get("https://github.com/iamhansko/escape-room-workshop/raw/refs/heads/main/img/hint1.png")
+              hint_image.raise_for_status()
+              s3.put_object(
+                Bucket=S3_BUCKET,
+                Key="hints/hint1.png",
+                Body=hint_image.content,
+                ContentType="image/png"
+              )
+              s3.put_object(
+                Bucket=S3_BUCKET,
+                Key="hints/hint2.txt",
+                Body="교실에 꽃 한 송이가 숨겨져 있다.\n\n비밀번호의 1번째 자리는\n\n빨강꽃이라면 2\n파랑꽃이라면 9\n노랑꽃이라면 3\n분홍꽃이라면 4",
+                ContentType="text/plain; charset=utf-8"
+              )
+              s3.put_object(
+                Bucket=S3_BUCKET,
+                Key="hints/hint3.txt",
+                Body="비밀번호는 총 3자리이다.\n2번째 자리는 8이다.",
+                ContentType="text/plain; charset=utf-8"
+              )
+              s3.put_object(
+                Bucket=S3_BUCKET,
+                Key="hints/hint4.txt",
+                Body="비밀번호의 마지막 자리는\n정육면체의 [꼭짓점 수]와 동일한 숫자이다.",
+                ContentType="text/plain; charset=utf-8"
+              )
+            except Exception as e:
+              print(e)' > index.py
+            cat index.py
+            python -m pip install requests boto3
+            python index.py
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: Ec2AdminProfile
+      Roles: 
+        - !Ref BastionEc2IamRole
+  
+  TerminateBastionEc2:
+    Type: Custom::TerminateInstances
+    DependsOn:
+      - BastionEc2
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambdaFunction.Arn
+  CustomResourceLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomResourceLambdaIamRole.Arn
+      Runtime: python3.13
+      Timeout: 60
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          import cfnresponse
+          def lambda_handler(event, context):
+            try:
+              ec2 = boto3.client("ec2")
+              response = ec2.terminate_instances(
+                InstanceIds=["${BastionEc2.InstanceId}"]
+              )
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            except Exception as e:
+              cfnresponse.send(event, context, cfnresponse.FAILED, {"Message": str(e)})
+  CustomResourceLambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CustomLambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:*
+                Resource: "*"
+
+Outputs:
+  WebsiteURL:
+    Value: !GetAtt S3Bucket.WebsiteURL
+    Description: S3 Static Website
