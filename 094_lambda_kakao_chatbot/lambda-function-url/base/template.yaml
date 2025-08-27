@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion : '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS Lambda Kakao AI Chatbot
+
+Mappings:
+  ResourceMap:
+    ChatbotLambdaFunction:
+      Name: chatbot-lambda
+    CallbackLambdaFunction: 
+      Name: callback-lambda
+
+Globals:
+  Function:
+    Timeout: 480
+    MemorySize: 1024
+    Environment:
+      Variables:
+        CALLBACK_LAMBDA_FUNCTION_NAME: !FindInMap [ResourceMap, CallbackLambdaFunction, Name]
+
+Resources:
+  KakaoChatbotLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !FindInMap [ResourceMap, ChatbotLambdaFunction, Name]
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      CodeUri: ./src
+      Description: Kakao Chatbot Function
+      Role: !GetAtt KakaoChatbotLambdaFunctionRole.Arn
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowMethods: 
+            - "*"
+          AllowOrigins: 
+            - "*"
+        InvokeMode: BUFFERED
+
+  KakaoChatbotLambdaFunctionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: KakaoChatbotIamPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                    - lambda:InvokeAsync
+                  Resource: "*"
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource: "*"
+
+  CallbackLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !FindInMap [ResourceMap, CallbackLambdaFunction, Name]
+      Handler: callback.lambda_handler
+      Runtime: python3.12
+      CodeUri: ./src
+      Layers:
+        - !Ref LambdaLayer
+      Description: Kakao Chatbot Callback Function
+      Role: !GetAtt CallbackLambdaFunctionRole.Arn
+  
+  CallbackLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CallbackIamPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - lambda:InvokeAsync
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - bedrock:*
+                  - translate:*
+                  - s3:*
+                Resource: "*"
+  
+  LambdaLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: LambdaLayer
+      Description: Python Lambda Layer
+      ContentUri: ./layer.zip
+      CompatibleRuntimes:
+        - python3.12
