@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion : '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS Lambda Slack App
+
+Parameters:
+  SlackClientId:
+    Type: String
+    Default: ""
+  SlackClientSecret:
+    Type: String
+    Default: ""
+  SlackSigningSecret:
+    Type: String
+    Default: ""
+
+Globals:
+  Function:
+    Timeout: 480
+    MemorySize: 1024
+    Environment:
+      Variables:
+        SLACK_CLIENT_ID: !Ref SlackClientId
+        SLACK_CLIENT_SECRET: !Ref SlackClientSecret
+        SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
+        OAUTH_STATE_S3_BUCKET_NAME: !Ref OauthStateS3Bucket
+        INSTALLATION_S3_BUCKET_NAME: !Ref InstallationS3Bucket
+        TEXT_TO_IMAGE_S3_BUCKET_NAME : !Ref TextToImageS3Bucket
+        AWS_REGION_NAME : !Ref AWS::Region
+
+Resources:
+  OauthStateS3Bucket:
+    Type: 'AWS::S3::Bucket' 
+
+  InstallationS3Bucket:
+    Type: 'AWS::S3::Bucket'
+  
+  TextToImageS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+  TextToImageS3BucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref TextToImageS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub "${TextToImageS3Bucket.Arn}/*"
+
+  AWSLambdaSlackAppFunctionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: SlackAppFunctionPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                    - lambda:InvokeAsync
+                  Resource: "*"
+                - Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                    - s3:GetObject
+                    - s3:GetObjectAcl
+                    - s3:PutObject
+                    - s3:PutObjectAcl
+                    - s3:ReplicateObject
+                    - s3:DeleteObject
+                  Resource: 
+                    - !Sub "${OauthStateS3Bucket.Arn}/*"
+                    - !Sub "${InstallationS3Bucket.Arn}/*"
+                    - !Sub "${TextToImageS3Bucket.Arn}/*"
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource: "*"
+                - Effect: Allow
+                  Action:
+                    - bedrock:*
+                    - translate:TranslateText
+                  Resource: "*"
+  
+  LambdaLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: LambdaLayer
+      Description: Python Lambda Layer
+      ContentUri: ./layer.zip
+      CompatibleRuntimes:
+        - python3.12
+  
+  AWSLambdaSlackAppFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      CodeUri: ./src
+      Layers:
+        - !Ref LambdaLayer
+      Description: Slack App Function
+      Role: !GetAtt AWSLambdaSlackAppFunctionRole.Arn
+      Events:
+        SlackEvents:
+          Type: Api
+          Properties:
+            Path: /slack/events
+            Method: POST
+        SlackOauthRedirect:
+          Type: Api
+          Properties:
+            Path: /slack/oauth_redirect
+            Method: GET
+        SlackInstall:
+          Type: Api
+          Properties:
+            Path: /slack/install
+            Method: GET
+
+Outputs:
+  OauthStateS3Bucket:
+    Description: "Oauth State S3 Bucket"
+    Value: !GetAtt OauthStateS3Bucket.Arn  
+  InstallationS3Bucket:
+    Description: "Installation S3 Bucket"
+    Value: !GetAtt InstallationS3Bucket.Arn
+  TextToImageS3Bucket:
+    Description: "Text to Image S3 Bucket"
+    Value: !GetAtt TextToImageS3Bucket.Arn   
+  SlackAppFunction:
+    Description: "Slack App Function ARN"
+    Value: !GetAtt AWSLambdaSlackAppFunction.Arn
+  SlackAppFunctionRole:
+    Description: "IAM Role for Slack App Function"
+    Value: !GetAtt AWSLambdaSlackAppFunctionRole.Arn
