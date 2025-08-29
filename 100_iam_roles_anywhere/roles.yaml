@@ -1,0 +1,337 @@
+Parameters:
+  Passphrase:
+    Type: String
+    Default: rolePassword1234!
+  AmazonLinux2023AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Resources:
+  PrivateCA:
+    Type: AWS::ACMPCA::CertificateAuthority
+    Properties:
+      KeyAlgorithm: RSA_2048
+      KeyStorageSecurityStandard: FIPS_140_2_LEVEL_3_OR_HIGHER
+      SigningAlgorithm: SHA256WITHRSA
+      Subject:
+        Organization: Peccy Inc
+        OrganizationalUnit: Red Team
+        Country: KR
+      Type: ROOT
+      UsageMode: GENERAL_PURPOSE
+  PrivateCAActivation:
+    Type: AWS::ACMPCA::CertificateAuthorityActivation
+    Properties:
+      Certificate: !GetAtt PrivateCACertificate.Certificate
+      CertificateAuthorityArn: !GetAtt PrivateCA.Arn
+      Status: ACTIVE
+  PrivateCACertificate:
+    Type: AWS::ACMPCA::Certificate
+    Properties:
+      CertificateAuthorityArn: !GetAtt PrivateCA.Arn
+      CertificateSigningRequest: !GetAtt PrivateCA.CertificateSigningRequest
+      SigningAlgorithm: SHA256WITHRSA
+      TemplateArn: arn:aws:acm-pca:::template/RootCACertificate/V1
+      Validity: 
+        Type: YEARS
+        Value: 10
+  PrivateCAPermission:
+    Type: AWS::ACMPCA::Permission
+    Properties:
+      Actions:
+        - IssueCertificate
+        - GetCertificate
+        - ListPermissions
+      CertificateAuthorityArn: !GetAtt PrivateCA.Arn
+      Principal: acm.amazonaws.com
+
+  ACMCertificate:
+    Type: AWS::CertificateManager::Certificate
+    DependsOn:
+      - PrivateCAActivation
+      - PrivateCAPermission
+    Properties:
+      CertificateAuthorityArn: !GetAtt PrivateCA.Arn
+      DomainName: rolesanywhere.com
+      KeyAlgorithm: RSA_2048
+  
+  IamRaTrustAnchor:
+    Type: AWS::RolesAnywhere::TrustAnchor
+    Properties:
+      Enabled: True
+      Name: iam-ra-ta
+      Source: 
+        SourceData: 
+          AcmPcaArn: !GetAtt PrivateCA.Arn
+        SourceType: AWS_ACM_PCA
+  IamRaProfile:
+    Type: AWS::RolesAnywhere::Profile
+    Properties:
+      Enabled: True
+      Name: iam-ra-profile
+      DurationSeconds: 43200
+      RoleArns: 
+        - !GetAtt S3ReadOnlyRole.Arn
+      # AcceptRoleSessionName: Boolean
+      # RequireInstanceProperties: Boolean
+  S3ReadOnlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - rolesanywhere.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+              - sts:SetSourceIdentity
+            Condition:
+              ArnEquals:
+                "aws:SourceArn":
+                  - !GetAtt IamRaTrustAnchor.TrustAnchorArn
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public-subnet
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: "1"                
+        Timeout: PT10M
+    Properties:
+      ImageId: !Ref AmazonLinux2023AmiId
+      InstanceType: t3.medium
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet
+          GroupSet: 
+            - !GetAtt Vpc.DefaultSecurityGroup
+      Tags: 
+        - Key: Name
+          Value: bastion-ec2
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash
+            dnf update -yq
+            dnf groupinstall -yq "Development Tools"
+
+            aws acm export-certificate \
+            --certificate-arn "${ACMCertificate}" \
+            --passphrase $(echo -n "${Passphrase}" | base64) > /home/ec2-user/export.json
+            cat /home/ec2-user/export.json | jq -r '"\(.Certificate)"' > /home/ec2-user/certificate.pem
+            cat /home/ec2-user/export.json | jq -r '"\(.CertificateChain)"' > /home/ec2-user/certificate_chain.pem
+            cat /home/ec2-user/export.json | jq -r '"\(.PrivateKey)"' > /home/ec2-user/private_key.pem
+            openssl rsa -in /home/ec2-user/private_key.pem -out /home/ec2-user/decrypted_key.pem -passin pass:${Passphrase}
+
+            aws s3api put-object --bucket ${S3Bucket} --key certificate.pem --body /home/ec2-user/certificate.pem
+            aws s3api put-object --bucket ${S3Bucket} --key certificate_chain.pem --body /home/ec2-user/certificate_chain.pem
+            aws s3api put-object --bucket ${S3Bucket} --key private_key.pem --body /home/ec2-user/private_key.pem
+            aws s3api put-object --bucket ${S3Bucket} --key decrypted_key.pem --body /home/ec2-user/decrypted_key.pem
+
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: Ec2AdminProfile
+      Roles: 
+        - !Ref BastionEc2IamRole
+  TerminateBastionEc2:
+    Type: Custom::TerminateInstances
+    DependsOn:
+      - BastionEc2
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambdaFunction.Arn
+  CustomResourceLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomResourceLambdaIamRole.Arn
+      Runtime: python3.13
+      Timeout: 60
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          import cfnresponse
+          import json
+          def lambda_handler(event, context):
+            print(json.dumps(event, indent=2))
+            try:
+              ec2 = boto3.client("ec2")
+              response = ec2.terminate_instances(
+                InstanceIds=["${BastionEc2.InstanceId}"]
+              )
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            except Exception as e:
+              cfnresponse.send(event, context, cfnresponse.FAILED, {"Message": str(e)})
+  CustomResourceLambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CustomLambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:*
+                Resource: "*"
+  
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+
+Outputs:
+  CertificatePemFileDownload:
+    Value: !Sub ${AWS::Region}.console.aws.amazon.com/s3/object/${S3Bucket}?prefix=certificate.pem
+    Description: Download certificate.pem
+  DecryptedPriateKeyPemFileDownload:
+    Value: !Sub ${AWS::Region}.console.aws.amazon.com/s3/object/${S3Bucket}?prefix=decrypted_key.pem
+    Description: Download decrypted_key.pem
+  MacOSCommandAarch64:
+    Value: !Sub |
+      wget https://rolesanywhere.amazonaws.com/releases/1.7.1/Aarch64/MacOS/Sonoma/aws_signing_helper &&
+       chmod +x aws_signing_helper &&
+       ./aws_signing_helper credential-process
+       --trust-anchor-arn ${IamRaTrustAnchor.TrustAnchorArn}
+       --profile-arn ${IamRaProfile.ProfileArn}
+       --role-arn ${S3ReadOnlyRole.Arn}
+       --certificate certificate.pem
+       --private-key decrypted_key.pem > session.json &&
+       export AWS_ACCESS_KEY_ID=$(jq -r ".AccessKeyId" session.json) &&
+       export AWS_SECRET_ACCESS_KEY=$(jq -r ".SecretAccessKey" session.json) &&
+       export AWS_SESSION_TOKEN=$(jq -r ".SessionToken" session.json) &&
+       aws sts get-caller-identity
+    Description: Get AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
+  WindowsCommandX86:
+    Value: !Sub |
+      curl -o aws_signing_helper.exe https://rolesanywhere.amazonaws.com/releases/1.7.1/X86_64/Windows/Server2019/aws_signing_helper.exe &&
+       aws_signing_helper credential-process
+       --trust-anchor-arn ${IamRaTrustAnchor.TrustAnchorArn}
+       --profile-arn ${IamRaProfile.ProfileArn}
+       --role-arn ${S3ReadOnlyRole.Arn}
+       --certificate certificate.pem
+       --private-key decrypted_key.pem
+    Description: Get AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
+  LinuxCommandX86:
+    Value: !Sub |
+      wget https://rolesanywhere.amazonaws.com/releases/1.7.1/X86_64/Linux/Amzn2023/aws_signing_helper &&
+       chmod +x aws_signing_helper &&
+       ./aws_signing_helper credential-process
+       --trust-anchor-arn ${IamRaTrustAnchor.TrustAnchorArn}
+       --profile-arn ${IamRaProfile.ProfileArn}
+       --role-arn ${S3ReadOnlyRole.Arn}
+       --certificate certificate.pem
+       --private-key decrypted_key.pem > session.json &&
+       export AWS_ACCESS_KEY_ID=$(jq -r ".AccessKeyId" session.json) &&
+       export AWS_SECRET_ACCESS_KEY=$(jq -r ".SecretAccessKey" session.json) &&
+       export AWS_SESSION_TOKEN=$(jq -r ".SessionToken" session.json) &&
+       aws sts get-caller-identity
+    Description: Get AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
+  LinuxCommandAarch64:
+    Value: !Sub |
+      wget https://rolesanywhere.amazonaws.com/releases/1.7.1/Aarch64/Linux/Amzn2023/aws_signing_helper &&
+       chmod +x aws_signing_helper &&
+       ./aws_signing_helper credential-process
+       --trust-anchor-arn ${IamRaTrustAnchor.TrustAnchorArn}
+       --profile-arn ${IamRaProfile.ProfileArn}
+       --role-arn ${S3ReadOnlyRole.Arn}
+       --certificate certificate.pem
+       --private-key decrypted_key.pem > session.json &&
+       export AWS_ACCESS_KEY_ID=$(jq -r ".AccessKeyId" session.json) &&
+       export AWS_SECRET_ACCESS_KEY=$(jq -r ".SecretAccessKey" session.json) &&
+       export AWS_SESSION_TOKEN=$(jq -r ".SessionToken" session.json) &&
+       aws sts get-caller-identity
+    Description: Get AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
+  MacOSCommandX86:
+    Value: !Sub |
+      wget https://rolesanywhere.amazonaws.com/releases/1.7.1/X86_64/MacOS/Ventura/aws_signing_helper &&
+       chmod +x aws_signing_helper &&
+       ./aws_signing_helper credential-process
+       --trust-anchor-arn ${IamRaTrustAnchor.TrustAnchorArn}
+       --profile-arn ${IamRaProfile.ProfileArn}
+       --role-arn ${S3ReadOnlyRole.Arn}
+       --certificate certificate.pem
+       --private-key decrypted_key.pem > session.json &&
+       export AWS_ACCESS_KEY_ID=$(jq -r ".AccessKeyId" session.json) &&
+       export AWS_SECRET_ACCESS_KEY=$(jq -r ".SecretAccessKey" session.json) &&
+       export AWS_SESSION_TOKEN=$(jq -r ".SessionToken" session.json) &&
+       aws sts get-caller-identity
+    Description: Get AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
