@@ -230,8 +230,8 @@ Resources:
           echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
           echo 'source /usr/share/bash-completion/bash_completion' >> ~/.bashrc
           echo 'source <(kubectl completion bash)' >> ~/.bashrc
-          echo 'alias k=kubectl' >>~/.bashrc
-          echo 'complete -o default -F __start_kubectl k' >>~/.bashrc
+          echo 'alias k=kubectl' >> ~/.bashrc
+          echo 'complete -o default -F __start_kubectl k' > >~/.bashrc
 
           ARCH=amd64
           PLATFORM=$(uname -s)_$ARCH
@@ -284,6 +284,20 @@ Resources:
           --wait' > install_karpenter.sh
           chmod +x install_karpenter.sh
           ./install_karpenter.sh
+
+          echo 'apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "true"
+            name: gp3
+          parameters:
+            fsType: ext4
+            type: gp3
+          provisioner: kubernetes.io/aws-ebs
+          reclaimPolicy: Delete
+          volumeBindingMode: WaitForFirstConsumer' > /home/ec2-user/manifests/gp3-sc.yaml
+          kubectl apply -f /home/ec2-user/manifests/gp3-sc.yaml
           EOF
 
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
@@ -422,6 +436,38 @@ Resources:
       Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
       ClientIdList: 
         - sts.amazonaws.com
+  EbsCsiDriverAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: aws-ebs-csi-driver
+      ClusterName: !Ref EksCluster
+      ServiceAccountRoleArn: !GetAtt EbsCsiDriverRole.Arn
+  EbsCsiDriverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Effect": "Allow",
+                      "Principal": {
+                          "Federated": "${EksOidcProvider.Arn}"
+                      },
+                      "Action": "sts:AssumeRoleWithWebIdentity",
+                      "Condition": {
+                          "StringEquals": {
+                              "${OidcProvider}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa",
+                              "${OidcProvider}:aud": "sts.amazonaws.com"
+                          }
+                      }
+                  }
+              ]
+            }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
   BastionEc2IamAccessEntry:
     Type: AWS::EKS::AccessEntry
     Properties:
@@ -775,150 +821,11 @@ Resources:
               --set vpcId=${Vpc} \
               --wait
 
-              kubectl create namespace kuberay-operator
-              helm repo add kuberay https://ray-project.github.io/kuberay-helm
-              helm repo update kuberay
-              helm install kuberay-operator kuberay/kuberay-operator -n kuberay-operator --version 1.4.2
-              
-              mkdir -p /home/ec2-user/manifests/stablediffusion
-              echo 'apiVersion: v1
-              kind: Namespace
-              metadata:
-                name: stablediffusion
-              ---
-              apiVersion: ray.io/v1
-              kind: RayService
-              metadata:
-                name: stablediffusion
-                namespace: stablediffusion
-              spec:
-                serviceUnhealthySecondThreshold: 900
-                deploymentUnhealthySecondThreshold: 300
-                serveConfigV2: |
-                  applications:
-                    - name: stable-diffusion-deployment
-                      import_path: "ray_serve_sd:entrypoint"
-                      route_prefix: "/"
-                      runtime_env:
-                        env_vars:
-                          MODEL_ID: "stabilityai/stable-diffusion-2-1"
-                        pip:
-                          - transformers==4.25.1
-                      deployments:
-                        - name: stable-diffusion-v2
-                          autoscaling_config:
-                            metrics_interval_s: 0.2
-                            min_replicas: 1
-                            max_replicas: 4
-                            look_back_period_s: 2
-                            downscale_delay_s: 600
-                            upscale_delay_s: 30
-                            target_num_ongoing_requests_per_replica: 1
-                          graceful_shutdown_timeout_s: 5
-                          max_concurrent_queries: 100
-                          ray_actor_options:
-                            num_cpus: 3
-                            num_gpus: 1
-                rayClusterConfig:
-                  rayVersion: "2.48.0"
-                  enableInTreeAutoscaling: true
-                  headGroupSpec:
-                    headService:
-                      metadata:
-                        namespace: stablediffusion
-                    rayStartParams:
-                      dashboard-host: "0.0.0.0"
-                    template:
-                      spec:
-                        containers:
-                          - name: head
-                            image: public.ecr.aws/data-on-eks/ray2.11.0-py310-gpu-stablediffusion:latest
-                            imagePullPolicy: IfNotPresent
-                            lifecycle:
-                              preStop:
-                                exec:
-                                  command: ["/bin/sh", "-c", "ray stop"]
-                            ports:
-                              - containerPort: 6379
-                                name: gcs-server
-                              - containerPort: 8265
-                                name: dashboard
-                              - containerPort: 10001
-                                name: client
-                              - containerPort: 8000
-                                name: serve
-                            volumeMounts:
-                              - mountPath: /tmp/ray
-                                name: ray-logs
-                            resources:
-                              limits:
-                                cpu: 2
-                                memory: 16Gi
-                              requests:
-                                cpu: 2
-                                memory: 16Gi
-                        nodeSelector:
-                          nodegroup: x86-cpu
-                          type: karpenter
-                        volumes:
-                          - name: ray-logs
-                            emptyDir: {}
-                  workerGroupSpecs:
-                    - groupName: gpu
-                      minReplicas: 1
-                      maxReplicas: 4
-                      rayStartParams: {}
-                      template:
-                        spec:
-                          containers:
-                            - name: worker
-                              image: public.ecr.aws/data-on-eks/ray2.11.0-py310-gpu-stablediffusion:latest
-                              imagePullPolicy: IfNotPresent
-                              lifecycle:
-                                preStop:
-                                  exec:
-                                    command: ["/bin/sh", "-c", "ray stop"]
-                              resources:
-                                limits:
-                                  cpu: "3"
-                                  memory: "14Gi"
-                                  nvidia.com/gpu: 1
-                                requests:
-                                  cpu: "3"
-                                  memory: "14Gi"
-                                  nvidia.com/gpu: 1
-                          nodeSelector:
-                            nodegroup: g5-gpu
-                            type: karpenter
-                          tolerations:
-                            - key: "nvidia.com/gpu"
-                              operator: "Exists"
-                              effect: "NoSchedule"
-              ---
-              apiVersion: networking.k8s.io/v1
-              kind: Ingress
-              metadata:
-                name: serve
-                namespace: stablediffusion
-                annotations:
-                  alb.ingress.kubernetes.io/scheme: internet-facing
-                  alb.ingress.kubernetes.io/target-type: ip
-                  alb.ingress.kubernetes.io/security-groups: ${EksCluster.ClusterSecurityGroupId}, ${AlbSecurityGroup.GroupId}
-                  alb.ingress.kubernetes.io/load-balancer-name: serve
-              spec:
-                ingressClassName: alb
-                rules:
-                - http:
-                    paths:
-                    - path: /
-                      pathType: ImplementationSpecific
-                      backend:
-                        service:
-                          name: stablediffusion-head-svc
-                          port:
-                            number: 8000' > /home/ec2-user/manifests/stablediffusion/ray-service.yaml
-              kubectl apply -f /home/ec2-user/manifests/stablediffusion/ray-service.yaml
+              git clone https://github.com/kubeflow/manifests.git /home/ec2-user/manifests/kubeflow
+              cd /home/ec2-user/manifests/kubeflow
+              while ! kubectl kustomize example | kubectl apply --server-side --force-conflicts -f -; do echo "Retrying to apply resources"; sleep 20; done
               SSMEOF
+
   KarpenterControllerIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -973,7 +880,6 @@ Resources:
       ClusterName: !Ref EksCluster
       PrincipalArn: !GetAtt KarpenterNodeIamRole.Arn
       Type: EC2_LINUX
-
   ClusterAutoscalerRole:
     Type: AWS::IAM::Role
     Properties:
@@ -1025,13 +931,6 @@ Resources:
                   - "ec2:GetInstanceTypesFromInstanceRequirements"
                   - "eks:DescribeNodegroup"
                 Resource: "*"
-
-  AlbSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: "Security Group"
-      GroupName: alb-sg
-      VpcId: !Ref Vpc
   AWSLoadBalancerControllerRole:
     # https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
     Type: AWS::IAM::Role
@@ -1094,6 +993,12 @@ Resources:
                   - "shield:CreateProtection"
                   - "shield:DeleteProtection"
                 Resource: "*"
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: alb-sg
+      VpcId: !Ref Vpc
 
 Outputs:
   VsCode:
