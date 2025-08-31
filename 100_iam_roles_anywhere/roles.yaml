@@ -223,7 +223,7 @@ Resources:
           import cfnresponse
           import json
           def lambda_handler(event, context):
-            print(json.dumps(event, indent=2))
+            print(json.dumps(event))
             try:
               ec2 = boto3.client("ec2")
               response = ec2.terminate_instances(

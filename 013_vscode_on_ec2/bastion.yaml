@@ -34,6 +34,8 @@ Resources:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: !FindInMap [ResourceMap, Vpc, CidrBlock]
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
       Tags: 
         - Key : Name
           Value : !FindInMap [ResourceMap, Vpc, Name]

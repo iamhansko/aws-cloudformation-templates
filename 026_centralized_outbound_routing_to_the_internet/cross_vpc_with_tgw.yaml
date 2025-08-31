@@ -376,6 +376,7 @@ Resources:
           import boto3
           import cfnresponse
           def lambda_handler(event, context):
+            print(json.dumps(event))
             try:
               ec2 = boto3.client("ec2")
               tgw_id = event["ResourceProperties"]["TransitGatewayId"]
