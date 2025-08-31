@@ -1,0 +1,199 @@
+Resources:
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+      Policies:
+        - PolicyName: StepFunctionsPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - sns:Publish
+                  - logs:*
+                Resource: "*"
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  
+  ValidateDataFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          def lambda_handler(event, context):
+              data = event.get('data', {})
+              is_valid = len(data.get('name', '')) > 0 and data.get('age', 0) > 0
+              return {
+                  'statusCode': 200,
+                  'isValid': is_valid,
+                  'data': data,
+                  'message': 'Valid data' if is_valid else 'Invalid data'
+              }
+  ProcessDataFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          def lambda_handler(event, context):
+              data = event.get('data', {})
+              processed_data = {
+                  'id': f"user_{data.get('name', '').lower()}",
+                  'name': data.get('name', '').title(),
+                  'age': data.get('age', 0),
+                  'category': 'adult' if data.get('age', 0) >= 18 else 'minor',
+                  'processed_at': '2024-01-01T00:00:00Z'
+              }
+              return {
+                  'statusCode': 200,
+                  'processedData': processed_data
+              }
+  SnsTopic:
+    Type: AWS::SNS::Topic
+  
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "name(String), age(PositiveInteger)",
+          "StartAt": "ValidateData",
+          "States": {
+            "ValidateData": {
+              "Type": "Task",
+              "Resource": "${ValidateDataFunction.Arn}",
+              "Next": "IsValid"
+            },
+            "IsValid": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.isValid",
+                  "BooleanEquals": true,
+                  "Next": "ProcessData"
+                }
+              ],
+              "Default": "NotifyFailed"
+            },
+            "ProcessData": {
+              "Type": "Task",
+              "Resource": "${ProcessDataFunction.Arn}",
+              "Next": "NotifySucceeded"
+            },
+            "NotifySucceeded": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${SnsTopic}",
+                "Message": "StepFunction Succeeded",
+                "Subject": "SUCCEEDED"
+              },
+              "End": true
+            },
+            "NotifyFailed": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${SnsTopic}",
+                "Message": "StepFunction Failed",
+                "Subject": "FAILED"
+              },
+              "End": true
+            }
+          }
+        }
+
+  GoodExecution:
+    Type: Custom::StartExecution
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambdaFunction.Arn
+      StateMachine: !GetAtt StateMachine.Arn
+      Input:
+        data:
+          name: "Gildong"
+          age: 25
+  BadExecution:
+    Type: Custom::StartExecution
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambdaFunction.Arn
+      StateMachine: !GetAtt StateMachine.Arn
+      Input:
+        data:
+          name: "Hyunsu"
+          age: 0
+  CustomResourceLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomResourceLambdaIamRole.Arn
+      Runtime: python3.13
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import json
+          def lambda_handler(event, context):
+            print(json.dumps(event))
+            try:
+              stepfunctions = boto3.client("stepfunctions")
+              sate_machine_arn = event["ResourceProperties"]["StateMachine"]
+              input_data = json.dumps({
+                "data": {
+                  "name": str(event["ResourceProperties"]["Input"]["data"]["name"]),
+                  "age": int(event["ResourceProperties"]["Input"]["data"]["age"])
+                }
+              })
+              response = stepfunctions.start_execution(stateMachineArn=sate_machine_arn, input=input_data)
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            except Exception as e:
+              cfnresponse.send(event, context, cfnresponse.FAILED, {"Message": str(e)})
+  CustomResourceLambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CustomLambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: "*"
