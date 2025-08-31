@@ -1,0 +1,332 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+  # https://aws.amazon.com/ko/blogs/korea/limit-access-to-your-origins-using-the-aws-managed-prefix-list-for-amazon-cloudfront
+  # aws ec2 describe-managed-prefix-lists --region <REGION> | jq -r '.PrefixLists[] | select (.PrefixListName == "com.amazonaws.global.cloudfront.origin-facing") | .PrefixListId'
+  AWSRegions2PrefixListID:
+    ap-northeast-1:
+      PrefixList: pl-58a04531
+    ap-northeast-2:
+      PrefixList: pl-22a6434b
+    ap-northeast-3:
+      PrefixList: pl-31a14458
+    ap-south-1:
+      PrefixList: pl-9aa247f3
+    ap-southeast-1:
+      PrefixList: pl-31a34658
+    ap-southeast-2:
+      PrefixList: pl-b8a742d1
+    ca-central-1:
+      PrefixList: pl-38a64351
+    eu-central-1:
+      PrefixList: pl-a3a144ca
+    eu-north-1:
+      PrefixList: pl-fab65393
+    eu-west-1:
+      PrefixList: pl-4fa04526
+    eu-west-2:
+      PrefixList: pl-93a247fa
+    eu-west-3:
+      PrefixList: pl-75b1541c
+    sa-east-1:
+      PrefixList: pl-5da64334
+    us-east-1:
+      PrefixList: pl-3b927c52
+    us-east-2:
+      PrefixList: pl-b6a144df
+    us-west-1:
+      PrefixList: pl-4ea04527
+    us-west-2:
+      PrefixList: pl-82a045eb
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT7M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref VsCodeEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              dnf update -yq
+              dnf groupinstall -yq "Development Tools"
+              dnf install -yq git
+
+              export VSC_VERSION="4.102.3"
+              wget -q https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+              tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+              mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+              ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+
+              mkdir -p /home/ec2-user/.config/code-server
+              cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+              bind-addr: 0.0.0.0:8000
+              auth: none
+              cert: false
+              EOF
+              chown -R ec2-user:ec2-user /home/ec2-user/.config
+              cat <<EOF > /etc/systemd/system/code-server.service
+              [Unit]
+              Description=VS Code Server
+              After=network.target
+              [Service]
+              Type=simple
+              User=ec2-user
+              ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+              Restart=always
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+              systemctl daemon-reload
+              systemctl enable code-server
+              systemctl start code-server
+
+              /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Bastion EC2 SSH Connection"
+      GroupName: bastion-sg
+      SecurityGroupIngress:
+        - Description: com.amazonaws.global.cloudfront.origin-facing
+          IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourcePrefixListId: !FindInMap [ AWSRegions2PrefixListID, !Ref AWS::Region, PrefixList ]
+      VpcId: !Ref Vpc
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref VsCodeEc2IamRole
+  
+  # https://docs.aws.amazon.com/ko_kr/AmazonCloudFront/latest/DeveloperGuide/distribution-working-with.websockets.html
+  # https://github.com/aws-samples/code-server-setup-with-cloudformation/blob/main/code-server-stack.yaml
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt VsCodeEc2.PublicDnsName
+            Id: !GetAtt VsCodeEc2.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 8000
+              OriginProtocolPolicy: http-only
+        Enabled: true
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          ForwardedValues:
+            QueryString: 'false'
+          Compress: false
+          TargetOriginId: !GetAtt VsCodeEc2.PublicDnsName
+          ViewerProtocolPolicy: allow-all
+          CachePolicyId: !Ref CloudFrontCachePolicy
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # AllViewer
+  CloudFrontCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 1
+        Name: !Sub VSCode-${AWS::StackName}
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: all
+          EnableAcceptEncodingGzip: false
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+              - Accept-Charset
+              - Authorization
+              - Origin
+              - Accept
+              - Referer
+              - Host
+              - Accept-Language
+              - Accept-Encoding
+              - Accept-Datetime
+          QueryStringsConfig:
+            QueryStringBehavior: all
+  
+  QDeveloperSsmAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 180
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref VsCodeEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              dnf install -yq python3.13
+              ln -sf /usr/bin/python3.13 /usr/bin/python
+              python -m ensurepip --upgrade
+
+              dnf install -yq docker
+              dnf install -yq bash-completion
+              systemctl enable --now docker
+              # usermod -aG docker ec2-user
+              # newgrp docker
+              chmod 666 /var/run/docker.sock
+
+              su - ec2-user << 'EOF'
+              export HOME=/home/ec2-user/
+              cd $HOME
+              # code-server --install-extension amazonwebservices.amazon-q-vscode
+              wget -qO- https://astral.sh/uv/install.sh | sh
+              wget -qO- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+              export NVM_DIR="$([ -z "${!XDG_CONFIG_HOME-}" ] && printf %s "${!HOME}/.nvm" || printf %s "${!XDG_CONFIG_HOME}/nvm")"
+              [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+              nvm install --lts
+              curl -s --proto '=https' --tlsv1.2 -sSf "https://desktop-release.q.us-east-1.amazonaws.com/latest/q-x86_64-linux.zip" -o "q.zip"
+              unzip q.zip
+              ./q/install.sh --no-confirm
+              mkdir -p /home/ec2-user/.aws/amazonq
+              mkdir -p /home/ec2-user/ecs
+              echo '{
+                "mcpServers": {
+                  "awslabs.aws-documentation-mcp-server": {
+                    "command": "uvx",
+                    "args": ["awslabs.aws-documentation-mcp-server@latest"],
+                    "env": {
+                      "FASTMCP_LOG_LEVEL": "ERROR",
+                      "AWS_DOCUMENTATION_PARTITION": "aws"
+                    },
+                    "disabled": false,
+                    "autoApprove": []
+                  },
+                  "awslabs.aws-diagram-mcp-server": {
+                    "command": "uvx",
+                    "args": ["awslabs.aws-diagram-mcp-server"],
+                    "env": {
+                      "FASTMCP_LOG_LEVEL": "ERROR"
+                    },
+                    "autoApprove": [],
+                    "disabled": false
+                    }
+                  }
+                }
+              }' > /home/ec2-user/.aws/amazonq/mcp.json
+              EOF
+
+Outputs:
+  VsCode:
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
