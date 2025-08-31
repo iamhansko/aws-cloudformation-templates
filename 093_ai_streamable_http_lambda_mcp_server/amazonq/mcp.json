@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "awslabs.aws-documentation-mcp-server": {
+      "command": "uvx",
+      "args": ["awslabs.aws-documentation-mcp-server@latest"],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR",
+        "AWS_DOCUMENTATION_PARTITION": "aws"
+      },
+      "disabled": false,
+      "autoApprove": []
+    },
+    "streamable-http-mcp-server": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://xxxxxx.execute-api.us-east-1.amazonaws.com/Prod/mcp",
+        "--header",
+        "Authorization: Bearer Peccy"
+      ]
+    }
+  }
+}

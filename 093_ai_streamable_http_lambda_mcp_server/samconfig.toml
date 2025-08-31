@@ -1,0 +1,10 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "mcp-lambda-handler"
+resolve_s3 = true
+s3_prefix = "mcp-lambda-handler"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+parameter_overrides = "AmiId=\"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64\" McpAuthToken=\"Peccy\""
+image_repositories = []
