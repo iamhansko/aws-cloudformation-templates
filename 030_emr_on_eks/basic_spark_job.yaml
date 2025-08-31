@@ -1,0 +1,1090 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  AmazonLinux2023AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Mappings: 
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+  # https://aws.amazon.com/ko/blogs/korea/limit-access-to-your-origins-using-the-aws-managed-prefix-list-for-amazon-cloudfront
+  # aws ec2 describe-managed-prefix-lists --region <REGION> | jq -r '.PrefixLists[] | select (.PrefixListName == "com.amazonaws.global.cloudfront.origin-facing") | .PrefixListId'
+  AWSRegions2PrefixListID:
+    ap-northeast-1:
+      PrefixList: pl-58a04531
+    ap-northeast-2:
+      PrefixList: pl-22a6434b
+    ap-northeast-3:
+      PrefixList: pl-31a14458
+    ap-south-1:
+      PrefixList: pl-9aa247f3
+    ap-southeast-1:
+      PrefixList: pl-31a34658
+    ap-southeast-2:
+      PrefixList: pl-b8a742d1
+    ca-central-1:
+      PrefixList: pl-38a64351
+    eu-central-1:
+      PrefixList: pl-a3a144ca
+    eu-north-1:
+      PrefixList: pl-fab65393
+    eu-west-1:
+      PrefixList: pl-4fa04526
+    eu-west-2:
+      PrefixList: pl-93a247fa
+    eu-west-3:
+      PrefixList: pl-75b1541c
+    sa-east-1:
+      PrefixList: pl-5da64334
+    us-east-1:
+      PrefixList: pl-3b927c52
+    us-east-2:
+      PrefixList: pl-b6a144df
+    us-west-1:
+      PrefixList: pl-4ea04527
+    us-west-2:
+      PrefixList: pl-82a045eb
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, b]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, b]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: "1"        
+        Timeout: PT20M
+    Properties:
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      ImageId: !Ref AmazonLinux2023AmiId
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref BastionEc2SecurityGroup
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      Tags: [{ Key: Name, Value: bastion }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf groupinstall -yq "Development Tools"
+          dnf install -yq python3.13
+          ln -sf /usr/bin/python3.13 /usr/bin/python
+          python -m ensurepip --upgrade
+
+          export VSC_VERSION="4.102.3"
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          dnf install -yq git
+          dnf install -yq docker
+          dnf install -yq bash-completion
+          systemctl enable --now docker
+          # usermod -aG docker ec2-user
+          # newgrp docker
+          chmod 666 /var/run/docker.sock
+
+          su - ec2-user << 'EOF'
+          export HOME=/home/ec2-user
+          cd $HOME
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.0/2025-05-01/bin/linux/amd64/kubectl
+          chmod +x ./kubectl
+          mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$HOME/bin:$PATH
+          echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
+          echo 'source /usr/share/bash-completion/bash_completion' >> ~/.bashrc
+          echo 'source <(kubectl completion bash)' >> ~/.bashrc
+          echo 'alias k=kubectl' >>~/.bashrc
+          echo 'complete -o default -F __start_kubectl k' >>~/.bashrc
+
+          ARCH=amd64
+          PLATFORM=$(uname -s)_$ARCH
+          curl -sLO "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
+          tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm eksctl_$PLATFORM.tar.gz
+          sudo install -m 0755 /tmp/eksctl /usr/local/bin && rm /tmp/eksctl
+
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          ./get_helm.sh
+
+          aws eks update-kubeconfig --name ${EksCluster}
+
+          helm repo add autoscaler https://kubernetes.github.io/autoscaler
+          helm repo update autoscaler
+          helm install cluster-autoscaler autoscaler/cluster-autoscaler -n kube-system \
+          --set fullnameOverride="cluster-autoscaler" \
+          --set cloudProvider=aws \
+          --set autoDiscovery.clusterName=${EksCluster} \
+          --set awsRegion=${AWS::Region} \
+          --set resources.limits.cpu="1000m" \
+          --set resources.limits.memory="1G" \
+          --set resources.requests.cpu="200m" \
+          --set resources.requests.memory="512Mi" \
+          --set updateStrategy.type="RollingUpdate" \
+          --set updateStrategy.rollingUpdate.maxSurge=0 \
+          --set updateStrategy.rollingUpdate.maxUnavailable=1 \
+          --set rbac.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${ClusterAutoscalerRole.Arn}"
+          kubectl rollout status -n kube-system deployment cluster-autoscaler
+
+          echo $'#!/bin/bash
+          export KARPENTER_NAMESPACE="kube-system"
+          export KARPENTER_VERSION="1.6.0"
+          export K8S_VERSION="1.33"
+          export AWS_PARTITION="aws"
+          export CLUSTER_NAME="${EksCluster}"
+          export AWS_DEFAULT_REGION="${AWS::Region}"
+          export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          export TEMPOUT="$(mktemp)"
+          helm registry logout public.ecr.aws
+          helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
+          --version "$KARPENTER_VERSION" \
+          --namespace "$KARPENTER_NAMESPACE" --create-namespace \
+          --set "settings.clusterName=$CLUSTER_NAME" \
+          --set controller.resources.requests.cpu=1 \
+          --set controller.resources.requests.memory=1Gi \
+          --set controller.resources.limits.cpu=1 \
+          --set controller.resources.limits.memory=1Gi \
+          --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${KarpenterControllerIamRole.Arn}" \
+          --wait' > install_karpenter.sh
+          chmod +x install_karpenter.sh
+          ./install_karpenter.sh
+
+          kubectl create namespace big-data
+          EOF
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Bastion EC2 SSH Connection"
+      GroupName: bastion-sg
+      SecurityGroupIngress: 
+        - Description: com.amazonaws.global.cloudfront.origin-facing
+          IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourcePrefixListId: !FindInMap
+            - AWSRegions2PrefixListID
+            - !Ref AWS::Region
+            - PrefixList
+      VpcId: !Ref Vpc
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref BastionEc2IamRole]
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+  
+  # https://docs.aws.amazon.com/ko_kr/AmazonCloudFront/latest/DeveloperGuide/distribution-working-with.websockets.html
+  # https://github.com/aws-samples/code-server-setup-with-cloudformation/blob/main/code-server-stack.yaml
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt BastionEc2.PublicDnsName
+            Id: !GetAtt BastionEc2.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 8000
+              OriginProtocolPolicy: http-only
+        Enabled: true
+        DefaultCacheBehavior:
+          AllowedMethods: [ GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE ]
+          ForwardedValues:
+            QueryString: "false"
+          Compress: false
+          TargetOriginId: !GetAtt BastionEc2.PublicDnsName
+          ViewerProtocolPolicy: allow-all
+          CachePolicyId: !Ref CloudFrontCachePolicy
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # AllViewer
+  CloudFrontCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 1
+        Name: !Sub
+          - "VSCode-${Id}"
+          - Id: !Select [3, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: all
+          EnableAcceptEncodingGzip: false
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+              - Accept-Charset
+              - Authorization
+              - Origin
+              - Accept
+              - Referer
+              - Host
+              - Accept-Language
+              - Accept-Encoding
+              - Accept-Datetime
+          QueryStringsConfig:
+            QueryStringBehavior: all
+
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Version: "1.33"
+      BootstrapSelfManagedAddons: True
+      AccessConfig: 
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: True
+      Logging: 
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      ResourcesVpcConfig: 
+        EndpointPrivateAccess: True
+        EndpointPublicAccess: True
+        SubnetIds: 
+          - !Ref PublicSubneta
+          - !Ref PublicSubnetb
+          - !Ref PrivateSubneta
+          - !Ref PrivateSubnetb
+      RoleArn: !GetAtt EksClusterIamRole.Arn
+      UpgradePolicy: 
+        SupportType: STANDARD
+  EksClusterIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  EksOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList: 
+        - sts.amazonaws.com
+  BastionEc2IamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt BastionEc2IamRole.Arn
+      Type: STANDARD
+      AccessPolicies: 
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          AccessScope:
+            Type: cluster
+  BastionEc2SecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      IpProtocol: -1
+      SourceSecurityGroupId: !GetAtt BastionEc2SecurityGroup.GroupId
+  
+  CoreNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: core
+      AmiType: AL2023_x86_64_STANDARD
+      InstanceTypes: 
+        - t3.medium
+      CapacityType: ON_DEMAND
+      ClusterName: !Ref EksCluster
+      ForceUpdateEnabled: true
+      Labels: 
+        node-type: core
+      NodeRole: !GetAtt CoreNodeIamRole.Arn
+      ScalingConfig: 
+        DesiredSize: 2
+        MaxSize: 4
+        MinSize: 2
+      Subnets: 
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetb
+      LaunchTemplate:
+        Id: !Ref CoreLaunchTemplate
+  CoreLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: core-nodegroup-launchtemplate
+      LaunchTemplateData: 
+        KeyName: !Ref KeyPair
+        SecurityGroupIds: 
+          - !GetAtt EksCluster.ClusterSecurityGroupId
+        TagSpecifications: 
+          - ResourceType: instance
+            Tags: 
+              - Key: Name
+                Value: core-node
+  CoreNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  
+  SsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - BastionEc2 # Required
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 600
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref BastionEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              su - ec2-user << 'SSMEOF'
+              export HOME=/home/ec2-user
+              cd $HOME
+              aws eks update-kubeconfig --name ${EksCluster}
+              aws iam create-service-linked-role --aws-service-name spot.amazonaws.com || true
+
+              mkdir -p /home/ec2-user/manifests/spark
+              echo 'apiVersion: karpenter.sh/v1
+              kind: NodePool
+              metadata:
+                name: g5-gpu-karpenter
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      nodegroup: g5-gpu
+                      type: karpenter
+                  spec:
+                    nodeClassRef:
+                      group: karpenter.k8s.aws
+                      kind: EC2NodeClass
+                      name: g5-gpu-karpenter
+                    requirements:
+                      - key: karpenter.k8s.aws/instance-family
+                        operator: In
+                        values:
+                        - g5
+                      - key: karpenter.k8s.aws/instance-size
+                        operator: In
+                        values:
+                        - 2xlarge
+                        - 4xlarge
+                        - 8xlarge
+                        - 12xlarge
+                        - 16xlarge
+                        - 24xlarge
+                        - 48xlarge
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values:
+                        - amd64
+                      - key: karpenter.sh/capacity-type
+                        operator: In
+                        values:
+                        - spot
+                        - on-demand
+                      taints:
+                      - effect: NoSchedule
+                        key: nvidia.com/gpu
+                        value: Exists
+                disruption:
+                  budgets:
+                    - nodes: 10%
+                  consolidateAfter: 300s
+                  consolidationPolicy: WhenEmpty
+                limits:
+                  cpu: 1000
+                  memory: 1000Gi
+              ---
+              apiVersion: karpenter.k8s.aws/v1
+              kind: EC2NodeClass
+              metadata:
+                name: g5-gpu-karpenter
+              spec:
+                amiFamily: Bottlerocket
+                amiSelectorTerms:
+                - alias: bottlerocket@latest
+                blockDeviceMappings:
+                - deviceName: /dev/xvda
+                  ebs:
+                    encrypted: true
+                    volumeSize: 50Gi
+                    volumeType: gp3
+                - deviceName: /dev/xvdb
+                  ebs:
+                    encrypted: true
+                    volumeSize: 300Gi
+                    volumeType: gp3
+                detailedMonitoring: true
+                instanceStorePolicy: RAID0
+                metadataOptions:
+                  httpEndpoint: enabled
+                  httpProtocolIPv6: disabled
+                  httpPutResponseHopLimit: 2
+                  httpTokens: required
+                subnetSelectorTerms:
+                  - id: ${PrivateSubneta}
+                  - id: ${PrivateSubnetb}
+                securityGroupSelectorTerms:
+                  - id: ${EksCluster.ClusterSecurityGroupId}
+                instanceProfile: ${KarpenterNodeInstanceProfile}
+                tags:
+                  Name: g5-gpu-karpenter' > /home/ec2-user/manifests/g5-gpu-karpenter.yaml
+
+              echo 'apiVersion: karpenter.sh/v1
+              kind: NodePool
+              metadata:
+                name: g6-gpu-karpenter
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      nodegroup: g6-gpu
+                      type: karpenter
+                  spec:
+                    nodeClassRef:
+                      group: karpenter.k8s.aws
+                      kind: EC2NodeClass
+                      name: g6-gpu-karpenter
+                    requirements:
+                      - key: karpenter.k8s.aws/instance-family
+                        operator: In
+                        values:
+                          - g6
+                      - key: karpenter.k8s.aws/instance-size
+                        operator: In
+                        values:
+                          - 2xlarge
+                          - 4xlarge
+                          - 8xlarge
+                          - 12xlarge
+                          - 16xlarge
+                          - 24xlarge
+                          - 48xlarge
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values:
+                          - amd64
+                      - key: karpenter.sh/capacity-type
+                        operator: In
+                        values:
+                          - spot
+                          - on-demand
+                    taints:
+                      - effect: NoSchedule
+                        key: nvidia.com/gpu
+                        value: Exists
+                disruption:
+                  budgets:
+                  - nodes: 10%
+                  consolidateAfter: 300s
+                  consolidationPolicy: WhenEmpty
+                limits:
+                  cpu: 1000
+                  memory: 1000Gi
+              ---
+              apiVersion: karpenter.k8s.aws/v1
+              kind: EC2NodeClass
+              metadata:
+                name: g6-gpu-karpenter
+              spec:
+                amiFamily: Bottlerocket
+                amiSelectorTerms:
+                - alias: bottlerocket@latest
+                blockDeviceMappings:
+                - deviceName: /dev/xvda
+                  ebs:
+                    encrypted: true
+                    volumeSize: 50Gi
+                    volumeType: gp3
+                detailedMonitoring: true
+                instanceStorePolicy: RAID0
+                metadataOptions:
+                  httpEndpoint: enabled
+                  httpProtocolIPv6: disabled
+                  httpPutResponseHopLimit: 2
+                  httpTokens: required
+                subnetSelectorTerms:
+                  - id: ${PrivateSubneta}
+                  - id: ${PrivateSubnetb}
+                securityGroupSelectorTerms:
+                  - id: ${EksCluster.ClusterSecurityGroupId}
+                instanceProfile: ${KarpenterNodeInstanceProfile}
+                tags:
+                  Name: g6-gpu-karpenter' > /home/ec2-user/manifests/g6-gpu-karpenter.yaml
+              
+              echo 'apiVersion: karpenter.sh/v1
+              kind: NodePool
+              metadata:
+                name: x86-cpu-karpenter
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      nodegroup: x86-cpu
+                      type: karpenter
+                  spec:
+                    nodeClassRef:
+                      group: karpenter.k8s.aws
+                      kind: EC2NodeClass
+                      name: x86-cpu-karpenter
+                    requirements:
+                      - key: karpenter.k8s.aws/instance-family
+                        operator: In
+                        values:
+                        - m5
+                      - key: karpenter.k8s.aws/instance-size
+                        operator: In
+                        values:
+                          - xlarge
+                          - 2xlarge
+                          - 4xlarge
+                          - 8xlarge
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values:
+                          - amd64
+                      - key: karpenter.sh/capacity-type
+                        operator: In
+                        values:
+                          - spot
+                          - on-demand
+                disruption:
+                  budgets:
+                  - nodes: 10%
+                  consolidateAfter: 300s
+                  consolidationPolicy: WhenEmpty
+                limits:
+                  cpu: 1000
+                  memory: 1000Gi
+              ---
+              apiVersion: karpenter.k8s.aws/v1
+              kind: EC2NodeClass
+              metadata:
+                name: x86-cpu-karpenter
+              spec:
+                amiFamily: Bottlerocket
+                amiSelectorTerms:
+                - alias: bottlerocket@latest
+                blockDeviceMappings:
+                - deviceName: /dev/xvda
+                  ebs:
+                    encrypted: true
+                    volumeSize: 100Gi
+                    volumeType: gp3
+                - deviceName: /dev/xvdb
+                  ebs:
+                    encrypted: true
+                    volumeSize: 300Gi
+                    volumeType: gp3
+                detailedMonitoring: true
+                metadataOptions:
+                  httpEndpoint: enabled
+                  httpProtocolIPv6: disabled
+                  httpPutResponseHopLimit: 2
+                  httpTokens: required
+                subnetSelectorTerms:
+                  - id: ${PrivateSubneta}
+                  - id: ${PrivateSubnetb}
+                securityGroupSelectorTerms:
+                  - id: ${EksCluster.ClusterSecurityGroupId}
+                instanceProfile: ${KarpenterNodeInstanceProfile}
+                tags:
+                  Name: x86-cpu-karpenter' > /home/ec2-user/manifests/x86-cpu-karpenter.yaml
+              
+              kubectl apply -f /home/ec2-user/manifests
+              kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.17.1/deployments/static/nvidia-device-plugin.yml
+
+              echo $'#!/bin/bash
+              export AWS_REGION="${AWS::Region}"
+              export S3_BUCKET="s3://${EmrS3Bucket}"
+              export EMR_VIRTUAL_CLUSTER_ID="${EmrVirtualCluster.Id}"
+              export EMR_EXECUTION_ROLE_ARN="${EmrJobExecutionRole.Arn}"
+              export CLOUDWATCH_LOG_GROUP="${EmrCloudWatchLogGroup}"
+              JOB_NAME="taxidata"
+              EMR_EKS_RELEASE_LABEL="emr-6.10.0-latest" # Spark 3.3.1
+              SPARK_JOB_S3_PATH="$S3_BUCKET/$EMR_VIRTUAL_CLUSTER_ID/$JOB_NAME"
+              SCRIPTS_S3_PATH="$SPARK_JOB_S3_PATH/scripts"
+              INPUT_DATA_S3_PATH="$SPARK_JOB_S3_PATH/input"
+              OUTPUT_DATA_S3_PATH="$SPARK_JOB_S3_PATH/output"
+              echo $SCRIPTS_S3_PATH
+              aws s3 sync "./" $SCRIPTS_S3_PATH
+              mkdir -p "../input"
+              wget https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2022-01.parquet -O "../input/yellow_tripdata_2022-0.parquet"
+              max=20
+              for (( i=1; i <= $max; ++i ))
+              do
+              cp -rf "../input/yellow_tripdata_2022-0.parquet" "../input/yellow_tripdata_2022-$i.parquet"
+              done
+              aws s3 sync "../input" $INPUT_DATA_S3_PATH
+              rm -rf "../input"
+              aws emr-containers start-job-run \
+              --virtual-cluster-id $EMR_VIRTUAL_CLUSTER_ID \
+              --name $JOB_NAME \
+              --region $AWS_REGION \
+              --execution-role-arn $EMR_EXECUTION_ROLE_ARN \
+              --release-label $EMR_EKS_RELEASE_LABEL \
+              --job-driver \'{
+                "sparkSubmitJobDriver": {
+                  "entryPoint": "\'"$SCRIPTS_S3_PATH"\'/pyspark-taxi-trip.py",
+                  "entryPointArguments": ["\'"$INPUT_DATA_S3_PATH"\'",
+                    "\'"$OUTPUT_DATA_S3_PATH"\'"
+                  ],
+                  "sparkSubmitParameters": "--conf spark.executor.instances=2"
+                }
+              }\' \
+              --configuration-overrides \'{
+                "applicationConfiguration": [
+                    {
+                      "classification": "spark-defaults",
+                      "properties": {
+                        "spark.driver.cores":"1",
+                        "spark.executor.cores":"1",
+                        "spark.driver.memory": "4g",
+                        "spark.executor.memory": "4g",
+                        "spark.kubernetes.driver.podTemplateFile":"\'"$SCRIPTS_S3_PATH"\'/driver-pod-template.yaml",
+                        "spark.kubernetes.executor.podTemplateFile":"\'"$SCRIPTS_S3_PATH"\'/executor-pod-template.yaml",
+                        "spark.local.dir":"/data1",
+                        "spark.kubernetes.submission.connectionTimeout": "60000000",
+                        "spark.kubernetes.submission.requestTimeout": "60000000",
+                        "spark.kubernetes.driver.connectionTimeout": "60000000",
+                        "spark.kubernetes.driver.requestTimeout": "60000000",
+                        "spark.kubernetes.executor.podNamePrefix":"\'"$JOB_NAME"\'",
+                        "spark.metrics.appStatusSource.enabled":"true"
+                      }
+                    }
+                  ],
+                "monitoringConfiguration": {
+                  "persistentAppUI":"ENABLED",
+                  "cloudWatchMonitoringConfiguration": {
+                    "logGroupName":"\'"$CLOUDWATCH_LOG_GROUP"\'",
+                    "logStreamNamePrefix":"\'"$JOB_NAME"\'"
+                  },
+                  "s3MonitoringConfiguration": {
+                    "logUri":"\'"$S3_BUCKET/logs/"\'"
+                  }
+                }
+              }\'' > /home/ec2-user/manifests/spark/job.sh
+              chmod +x /home/ec2-user/manifests/spark/job.sh
+
+              echo 'import logging
+              import sys
+              from datetime import datetime
+              from pyspark.sql import SparkSession
+              from pyspark.sql.functions import *
+              from pyspark.sql import functions as f
+              formatter = logging.Formatter("[%(asctime)s] %(levelname)s @ line %(lineno)d: %(message)s")
+              handler = logging.StreamHandler(sys.stdout)
+              handler.setLevel(logging.INFO)
+              handler.setFormatter(formatter)
+              logger = logging.getLogger()
+              logger.setLevel(logging.INFO)
+              logger.addHandler(handler)
+              dt_string = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+              AppName = "NewYorkTaxiData"
+              def main(args):
+                  raw_input_folder = args[1]
+                  transform_output_folder = args[2]
+                  spark = SparkSession \
+                      .builder \
+                      .appName(AppName + "_" + str(dt_string)) \
+                      .getOrCreate()
+                  spark.sparkContext.setLogLevel("INFO")
+                  logger.info("Starting spark application")
+                  logger.info("Reading Parquet file from S3")
+                  ny_taxi_df = spark.read.parquet(raw_input_folder)
+                  final_ny_taxi_df = ny_taxi_df.withColumn("current_date", f.lit(datetime.now()))
+                  logger.info("NewYork Taxi data schema preview")
+                  final_ny_taxi_df.printSchema()
+                  logger.info("Previewing New York Taxi data sample")
+                  final_ny_taxi_df.show(20, truncate=False)
+                  logger.info("Total number of records: " + str(final_ny_taxi_df.count()))
+                  logger.info("Write New York Taxi data to S3 transform table")
+                  final_ny_taxi_df.repartition(2).write.mode("overwrite").parquet(transform_output_folder)
+                  logger.info("Ending spark application")
+                  spark.stop()
+                  return None
+              if __name__ == "__main__":
+                  print(len(sys.argv))
+                  if len(sys.argv) != 3:
+                      print("Usage: spark-etl [input-folder] [output-folder]")
+                      sys.exit(0)
+                  main(sys.argv)' > /home/ec2-user/manifests/spark/pyspark-taxi-trip.py
+              
+              echo 'apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ny-taxi-driver
+                namespace: big-data
+              spec:
+                nodeSelector:
+                  nodegroup: x86-cpu
+                  type: karpenter
+                initContainers:
+                  - name: volume-permission
+                    image: public.ecr.aws/docker/library/busybox
+                    command: ["sh", "-c", "mkdir /data1; chown -R 999:1000 /data1"]
+                containers:
+                  - name: spark-kubernetes-driver' > /home/ec2-user/manifests/spark/driver-pod-template.yaml
+
+              echo 'apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ny-taxi-exec
+                namespace: big-data
+              spec:
+                nodeSelector:
+                  nodegroup: x86-cpu
+                  type: karpenter
+                initContainers:
+                  - name: volume-permission
+                    image: public.ecr.aws/docker/library/busybox
+                    command: ["sh", "-c", "mkdir /data1; chown -R 999:1000 /data1"]
+                containers:
+                  - name: spark-kubernetes-executor' > /home/ec2-user/manifests/spark/executor-pod-template.yaml
+              SSMEOF
+  KarpenterControllerIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Effect": "Allow",
+                      "Principal": {
+                          "Federated": "${EksOidcProvider.Arn}"
+                      },
+                      "Action": "sts:AssumeRoleWithWebIdentity",
+                      "Condition": {
+                          "StringEquals": {
+                              "${OidcProvider}:sub": "system:serviceaccount:kube-system:karpenter",
+                              "${OidcProvider}:aud": "sts.amazonaws.com"
+                          }
+                      }
+                  }
+              ]
+            }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns:
+        # https://raw.githubusercontent.com/aws/karpenter-provider-aws/v1.6.0/website/content/en/preview/getting-started/getting-started-with-karpenter/cloudformation.yaml
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  KarpenterNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  KarpenterNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref KarpenterNodeIamRole ]
+  KarpenterNodeIamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt KarpenterNodeIamRole.Arn
+      Type: EC2_LINUX
+
+  ClusterAutoscalerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Effect": "Allow",
+                      "Principal": {
+                          "Federated": "${EksOidcProvider.Arn}"
+                      },
+                      "Action": "sts:AssumeRoleWithWebIdentity",
+                      "Condition": {
+                          "StringEquals": {
+                              "${OidcProvider}:sub": "system:serviceaccount:kube-system:cluster-autoscaler",
+                              "${OidcProvider}:aud": "sts.amazonaws.com"
+                          }
+                      }
+                  }
+              ]
+            }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: ClusterAutoscalerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "autoscaling:SetDesiredCapacity"
+                  - "autoscaling:TerminateInstanceInAutoScalingGroup"
+                Resource: "*"
+                Condition: 
+                  StringEquals:
+                    "aws:ResourceTag/k8s.io/cluster-autoscaler/enabled": "true"
+                    "aws:ResourceTag/k8s.io/cluster-autoscaler/${EksCluster}": "owned"
+              - Effect: "Allow"
+                Action:
+                  - "autoscaling:DescribeAutoScalingInstances"
+                  - "autoscaling:DescribeAutoScalingGroups"
+                  - "ec2:DescribeLaunchTemplateVersions"
+                  - "autoscaling:DescribeTags"
+                  - "autoscaling:DescribeLaunchConfigurations"
+                  - "ec2:DescribeInstanceTypes"
+                  - "autoscaling:DescribeScalingActivities"
+                  - "ec2:DescribeImages"
+                  - "ec2:GetInstanceTypesFromInstanceRequirements"
+                  - "eks:DescribeNodegroup"
+                Resource: "*"
+  
+  EmrVirtualCluster:
+    Type: AWS::EMRContainers::VirtualCluster
+    DependsOn:
+      - CoreNodeGroup
+      - BastionEc2
+    Properties:
+      ContainerProvider: 
+        Id: !Ref EksCluster
+        Info: 
+          EksInfo: 
+            Namespace: big-data
+        Type: EKS
+      Name: big-data-cluster
+  EmrJobExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Effect": "Allow",
+                      "Principal": {
+                          "Federated": "${EksOidcProvider.Arn}"
+                      },
+                      "Action": "sts:AssumeRoleWithWebIdentity",
+                      "Condition": {
+                          "StringLike": {
+                              "${OidcProvider}:sub": "system:serviceaccount:big-data:emr-containers-sa-*"
+                          }
+                      }
+                  }
+              ]
+            }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: EmrJobExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                  - logs:CreateLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: arn:aws:logs:*:*:*
+  EmrS3Bucket:
+    Type: AWS::S3::Bucket
+  EmrCloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /emr/on/eks
+
+Outputs:
+  VsCode:
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
+    Description: VsCode on BastionEC2
