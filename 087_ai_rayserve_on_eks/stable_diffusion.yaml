@@ -245,22 +245,22 @@ Resources:
 
           aws eks update-kubeconfig --name ${EksCluster}
 
-          helm repo add autoscaler https://kubernetes.github.io/autoscaler
-          helm repo update autoscaler
-          helm install cluster-autoscaler autoscaler/cluster-autoscaler -n kube-system \
-          --set fullnameOverride="cluster-autoscaler" \
-          --set cloudProvider=aws \
-          --set autoDiscovery.clusterName=${EksCluster} \
-          --set awsRegion=${AWS::Region} \
-          --set resources.limits.cpu="1000m" \
-          --set resources.limits.memory="1G" \
-          --set resources.requests.cpu="200m" \
-          --set resources.requests.memory="512Mi" \
-          --set updateStrategy.type="RollingUpdate" \
-          --set updateStrategy.rollingUpdate.maxSurge=0 \
-          --set updateStrategy.rollingUpdate.maxUnavailable=1 \
-          --set rbac.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${ClusterAutoscalerRole.Arn}"
-          kubectl rollout status -n kube-system deployment cluster-autoscaler
+          # helm repo add autoscaler https://kubernetes.github.io/autoscaler
+          # helm repo update autoscaler
+          # helm install cluster-autoscaler autoscaler/cluster-autoscaler -n kube-system \
+          # --set fullnameOverride="cluster-autoscaler" \
+          # --set cloudProvider=aws \
+          # --set autoDiscovery.clusterName=${EksCluster} \
+          # --set awsRegion=${AWS::Region} \
+          # --set resources.limits.cpu="1000m" \
+          # --set resources.limits.memory="1G" \
+          # --set resources.requests.cpu="200m" \
+          # --set resources.requests.memory="512Mi" \
+          # --set updateStrategy.type="RollingUpdate" \
+          # --set updateStrategy.rollingUpdate.maxSurge=0 \
+          # --set updateStrategy.rollingUpdate.maxUnavailable=1 \
+          # --set rbac.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${ClusterAutoscalerRole.Arn}"
+          # kubectl rollout status -n kube-system deployment cluster-autoscaler
 
           echo $'#!/bin/bash
           export KARPENTER_NAMESPACE="kube-system"

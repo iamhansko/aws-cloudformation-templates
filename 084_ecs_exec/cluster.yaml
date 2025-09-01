@@ -1,0 +1,445 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SeucirtyGroup Inbound Rule (Source 0.0.0.0/0)
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+  EcsAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, b]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, b]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT7M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref VsCodeEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf groupinstall -yq "Development Tools"
+          dnf install -yq git
+
+          export VSC_VERSION="4.102.3"
+          wget -q https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          dnf install -yq python3.13
+          ln -sf /usr/bin/python3.13 /usr/bin/python
+          python -m ensurepip --upgrade
+
+          dnf install -yq docker
+          dnf install -yq bash-completion
+          systemctl enable --now docker
+          # usermod -aG docker ec2-user
+          # newgrp docker
+          chmod 666 /var/run/docker.sock
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: bastion-sg
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      VpcId: !Ref Vpc
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref VsCodeEc2IamRole
+  
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings: 
+        - Name: containerInsights
+          Value: enhanced
+  EcsEc2CapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      AutoScalingGroupProvider: 
+        AutoScalingGroupArn: !GetAtt EcsAsg.AutoScalingGroupARN
+        ManagedDraining: ENABLED
+        ManagedScaling: 
+          InstanceWarmupPeriod: 30
+          MaximumScalingStepSize: 10000
+          MinimumScalingStepSize: 1
+          Status: ENABLED
+          TargetCapacity: 100
+        ManagedTerminationProtection: DISABLED
+  EcsEc2CapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      CapacityProviders: 
+        - !Ref EcsEc2CapacityProvider
+        - FARGATE
+        - FARGATE_SPOT
+      Cluster: !Ref EcsCluster
+      DefaultCapacityProviderStrategy: 
+        - Base: 0
+          CapacityProvider: !Ref EcsEc2CapacityProvider
+          Weight: 100
+  EcsAsg:
+    DependsOn: EcsCluster
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: "1"
+      DesiredCapacity: "2"
+      MaxSize: "6"
+      VPCZoneIdentifier:
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetb
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref EcsLt
+        Version: !GetAtt EcsLt.LatestVersionNumber
+      AvailabilityZoneDistribution:
+        CapacityDistributionStrategy: balanced-only
+  EcsLt:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref EcsAmiId
+        InstanceType: t3.medium
+        IamInstanceProfile: 
+          Name: !Ref EcsContainerInstanceProfile
+        SecurityGroupIds:
+          - !Ref EcsContainerInstanceSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+        KeyName: !Ref KeyPair
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: 
+              - Key: Name
+                Value : ecs-container-instance
+  EcsContainerInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group"
+      GroupName: ecs-container-instance-sg
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt Vpc.DefaultSecurityGroup
+      VpcId: !Ref Vpc
+  EcsContainerInstanceIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  EcsContainerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref EcsContainerInstanceIamRole
+
+  AwsCliTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: aws-cli-td
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - EC2
+      Cpu: 256
+      Memory: 512
+      TaskRoleArn: !Ref EcsTaskRole
+      ExecutionRoleArn: !Ref EcsTaskExecutionRole
+      ContainerDefinitions:
+        - Name: aws-cli
+          Image: amazon/aws-cli:latest
+          Essential: True
+          EntryPoint: ["sh", "-c", "while true; do sleep 3600; done"]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EcsTaskCloudWatchLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs-task-
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName : EcsTaskIamRole 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Policies:
+        - PolicyName: EcsExecPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName : EcsTaskExecutionIamRole 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+  EcsTaskCloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/ecs
+
+  EcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref AwsCliTaskDefinition
+      DesiredCount: 1
+      EnableExecuteCommand: True
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref EcsServiceSecurityGroup
+          Subnets:
+            - !Ref PrivateSubneta
+            - !Ref PrivateSubnetb
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref EcsEc2CapacityProvider
+          Weight: 1
+  EcsServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: ecs-service-sg
+      GroupDescription: Security Group
+      VpcId: !Ref Vpc
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${VsCodeEc2.PublicIp}:8000
+    Description: Public IP Address of the VS Code
+  EcsExecCommand:
+    Value: !Sub |
+      aws ecs execute-command 
+       --cluster ${EcsCluster}
+       --task $(aws ecs list-tasks --cluster ${EcsCluster} --service-name ${EcsService.Name} --query "taskArns[0]" --output text | cut -d"/" -f3)
+       --container aws-cli \
+       --interactive
+       --command "/bin/sh"
+    Description: ECS Exec Command
