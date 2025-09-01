@@ -436,10 +436,10 @@ Outputs:
     Description: Public IP Address of the VS Code
   EcsExecCommand:
     Value: !Sub |
-      aws ecs execute-command 
+      aws ecs execute-command
        --cluster ${EcsCluster}
        --task $(aws ecs list-tasks --cluster ${EcsCluster} --service-name ${EcsService.Name} --query "taskArns[0]" --output text | cut -d"/" -f3)
-       --container aws-cli \
+       --container aws-cli
        --interactive
        --command "/bin/sh"
     Description: ECS Exec Command
