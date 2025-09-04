@@ -501,7 +501,7 @@ Outputs:
     Value: !Sub http://${VsCodeEc2.PublicIp}:8000
     Description: Public IP Address of the VS Code
   ServiceConnectTestCommands:
-    # Inner VPC, Inter Task
+    # Inter Task
     # curl http://nginx.local
     Value: !Sub |
       aws ecs execute-command
