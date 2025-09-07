@@ -1,0 +1,1069 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SeucirtyGroup Inbound Rule (Source 0.0.0.0/0)
+  KubernetesVersion:
+    Description: EKS Cluster Kubernetes Version (1.XX)
+    Type: String
+    Default: "1.33"
+    AllowedValues: ["1.31", "1.32", "1.33"]
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+  GitHubUser:
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubUser] must not be empty
+  GitHubToken:
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubToken] must not be empty
+  GitHubRepo:
+    Type: String
+    Default: fastapi-sample
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, b]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, b]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT7M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !GetAtt EksCluster.ClusterSecurityGroupId
+            - !Ref VsCodeEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git
+          dnf groupinstall -yq "Development Tools"
+
+          export VSC_VERSION="4.102.3"
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          sudo -Eu ec2-user bash << 'EOF'
+          cd /home/ec2-user
+          mkdir -p /home/ec2-user/bin
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.3/2025-08-03/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          mv kubectl /home/ec2-user/bin/kubectl
+          export PATH=/home/ec2-user/bin:$PATH
+          echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+          echo "alias k=kubectl" >> ~/.bashrc
+          echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+          echo "source <(kubectl completion bash)" >> ~/.bashrc
+          exec bash
+          aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}
+
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+
+          curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
+          chmod 700 /home/ec2-user/get_helm.sh
+          /home/ec2-user/get_helm.sh
+
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update eks
+          helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
+          --set clusterName=${EksCluster} \
+          --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${AWSLoadBalancerControllerRole.Arn}" \
+          --set serviceAccount.name=aws-load-balancer-controller \
+          --set region=${AWS::Region} \
+          --set vpcId=${Vpc} \
+          --wait
+          EOF
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: bastion-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: bastion-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref VsCodeEc2IamRole
+
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Version: !Ref KubernetesVersion
+      AccessConfig: 
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      BootstrapSelfManagedAddons: true
+      Logging: 
+        ClusterLogging: 
+          EnabledTypes: 
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      ResourcesVpcConfig: 
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: false
+        SubnetIds: 
+          - !Ref PublicSubneta
+          - !Ref PublicSubnetb
+          - !Ref PrivateSubneta
+          - !Ref PrivateSubnetb
+      RoleArn: !GetAtt EksClusterIamRole.Arn
+  VsCodeEc2IamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      AccessPolicies: 
+        - AccessScope: 
+            Type: cluster
+          PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt VsCodeEc2IamRole.Arn
+      Type: STANDARD
+  CodePipelineIamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      AccessPolicies: 
+        - AccessScope: 
+            Type: cluster
+          PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt CodePipelineIamRole.Arn
+      Type: STANDARD
+  EksOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList: 
+        - sts.amazonaws.com
+
+  CoreNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: core-nodegroup
+      AmiType: AL2023_x86_64_STANDARD
+      InstanceTypes: 
+        - t3.medium #c5.large
+      CapacityType: ON_DEMAND
+      ClusterName: !Ref EksCluster
+      ForceUpdateEnabled: true
+      NodeRole: !GetAtt EksNodeIamRole.Arn
+      ScalingConfig: 
+        DesiredSize: 2
+        MaxSize: 4
+        MinSize: 2
+      Subnets: 
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetb
+  EksClusterIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  EksNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  
+  Nlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: network
+      Scheme: internet-facing
+      SecurityGroups:
+        - !GetAtt Vpc.DefaultSecurityGroup # Ignored
+      Subnets: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetb
+      Tags: 
+        - Key: elbv2.k8s.aws/cluster
+          Value: !Ref EksCluster
+        - Key: service.k8s.aws/resource
+          Value: LoadBalancer
+        - Key: service.k8s.aws/stack
+          Value: default/fastapi
+  NlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: nlb-sg
+      SecurityGroupIngress:
+        - !If [SecurityGroupInboundFromAnywhere, {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": "0.0.0.0/0"
+          }, !Ref AWS::NoValue]
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: nlb-sg
+  AWSLoadBalancerControllerRole:
+    # https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Federated": "${EksOidcProvider.Arn}"
+                    },
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                        "StringEquals": {
+                            "${OidcProvider}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller",
+                            "${OidcProvider}:aud": "sts.amazonaws.com"
+                        }
+                    }
+                }
+            ]
+          }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: AWSLoadBalancerControllerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "iam:CreateServiceLinkedRole"
+                Resource: "*"
+                Condition:
+                  StringEquals: 
+                    "iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"
+              - Effect: "Allow"
+                Action: 
+                  - "ec2:*"
+                  - "elasticloadbalancing:*"
+                Resource: "*"
+              - Effect: "Allow"
+                Action: 
+                  - "cognito-idp:DescribeUserPoolClient"
+                  - "acm:ListCertificates"
+                  - "acm:DescribeCertificate"
+                  - "iam:ListServerCertificates"
+                  - "iam:GetServerCertificate"
+                  - "waf-regional:GetWebACL"
+                  - "waf-regional:GetWebACLForResource"
+                  - "waf-regional:AssociateWebACL"
+                  - "waf-regional:DisassociateWebACL"
+                  - "wafv2:GetWebACL"
+                  - "wafv2:GetWebACLForResource"
+                  - "wafv2:AssociateWebACL"
+                  - "wafv2:DisassociateWebACL"
+                  - "shield:GetSubscriptionState"
+                  - "shield:DescribeProtection"
+                  - "shield:CreateProtection"
+                  - "shield:DeleteProtection"
+                Resource: "*"
+  
+  EbsCsiDriverAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: aws-ebs-csi-driver
+      ClusterName: !Ref EksCluster
+      ServiceAccountRoleArn: !GetAtt EbsCsiDriverAddonIamRole.Arn
+  EbsCsiDriverAddonIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # https://docs.aws.amazon.com/ko_kr/eks/latest/userguide/ebs-csi.html
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Federated": "${EksOidcProvider.Arn}"
+                    },
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                        "StringEquals": {
+                            "${OidcProvider}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa",
+                            "${OidcProvider}:aud": "sts.amazonaws.com"
+                        }
+                    }
+                }
+            ]
+          }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+  Ecr:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Delete
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts: 
+        Type: CODEPIPELINE
+      Environment: 
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+      ServiceRole: !Ref CodeBuildIamRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            variables:
+              AWS_ACCOUNT_ID: ${AWS::AccountId}
+              ECR_REPO_NAME: ${Ecr}
+          phases:
+            pre_build:
+              commands:
+                - ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime
+            build:
+              commands:
+                - BUILD_ID=$(echo $CODEBUILD_BUILD_ID | cut -d':' -f2)
+                - |
+                  cat > system.yaml << EOF
+                  apiVersion: apps/v1
+                  kind: Deployment
+                  metadata:
+                    name: fastapi
+                    labels:
+                      codebuild: $BUILD_ID
+                      codepipeline: $EXECUTION_ID
+                  spec:
+                    selector:
+                      matchLabels:
+                        app.kubernetes.io/name: fastapi
+                    replicas: 2
+                    template:
+                      metadata:
+                        labels:
+                          app.kubernetes.io/name: fastapi
+                      spec:
+                        containers:
+                        - image: $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME@$ECR_DIGEST_ID
+                          imagePullPolicy: Always
+                          name: fastapi
+                          ports:
+                          - containerPort: 8000
+                  ---
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: fastapi
+                    annotations:
+                      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+                      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+                      service.beta.kubernetes.io/aws-load-balancer-security-groups: ${NlbSecurityGroup}
+                      service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+                  spec:
+                    ports:
+                      - port: 80
+                        targetPort: 8000
+                        protocol: TCP
+                    type: LoadBalancer
+                    selector:
+                      app.kubernetes.io/name: fastapi
+                  EOF
+            post_build:
+              commands:
+                - echo $CODEBUILD_BUILD_ID
+                - echo $EXECUTION_ID
+          artifacts:
+            files:
+              - system.yaml
+            discard-paths: yes
+      TimeoutInMinutes: 15
+  CodeBuildIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore: 
+        Location: !Ref CodePipelineArtifactStoreBucket
+        Type: S3
+      ExecutionMode: QUEUED
+      PipelineType: V2
+      RestartExecutionOnUpdate: True
+      RoleArn: !GetAtt CodePipelineIamRole.Arn
+      Stages:
+        - Name: Source
+          # https://docs.aws.amazon.com/ko_kr/codepipeline/latest/userguide/action-reference-S3.html
+          Actions: 
+            - Name: GitHubSourceAction
+              ActionTypeId: 
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !GetAtt GitHubConnection.ConnectionArn
+                FullRepositoryId: !Sub ${GitHubUser}/${GitHubRepo}
+                BranchName: master
+                OutputArtifactFormat: CODE_ZIP
+                DetectChanges: True
+              OutputArtifacts: 
+                - Name: SourceArtifact
+              RunOrder: 1
+        - Name: ImageBuild
+          # https://docs.aws.amazon.com/ko_kr/codepipeline/latest/userguide/action-reference-ECRBuildAndPublish.html
+          Actions: 
+            - Name: ImageBuildAction
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Provider: ECRBuildAndPublish
+                Version: '1'
+              Configuration:
+                ECRRepositoryName: !Ref Ecr
+                RegistryType: private
+                ImageTags: latest
+                # DockerFilePath: 
+              InputArtifacts: 
+                - Name: SourceArtifact
+              Namespace: ImageVariables
+              RunOrder: 2
+        - Name: CodeBuild
+          # https://docs.aws.amazon.com/ko_kr/codepipeline/latest/userguide/action-reference-CodeBuild.html
+          Actions: 
+            - Name: CodeBuildAction
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+                PrimarySource: SourceArtifact
+                EnvironmentVariables: |
+                  [
+                    {"name": "EXECUTION_ID", "type": "PLAINTEXT", "value": "#{codepipeline.PipelineExecutionId}"},
+                    {"name": "ECR_DIGEST_ID", "type": "PLAINTEXT", "value": "#{ImageVariables.ECRImageDigestId}"}
+                  ]
+              InputArtifacts: 
+                - Name: SourceArtifact
+              OutputArtifacts: 
+                - Name: BuildArtifact
+              RunOrder: 3
+        - Name: Deploy
+          # https://docs.aws.amazon.com/ko_kr/codepipeline/latest/userguide/action-reference-EKS.html
+          Actions: 
+            - Name: EksDeployAction
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS
+                Provider: EKS
+                Version: '1'
+              Configuration:
+                ClusterName: !Ref EksCluster
+                ManifestFiles: system.yaml
+                Namespace: default
+                SecurityGroupIds: !GetAtt EksCluster.ClusterSecurityGroupId
+                Subnets: !Ref PrivateSubneta
+              InputArtifacts: 
+                - Name: BuildArtifact
+              OutputArtifacts: []
+              RunOrder: 4
+      # https://docs.aws.amazon.com/ko_kr/codepipeline/latest/userguide/reference-variables.html
+      # Variables: 
+      #   - Name: String
+      #     DefaultValue: String
+  CodePipelineArtifactStoreBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+  CodePipelineIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelineService
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+              - s3:GetBucketVersioning
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+              Resource:
+                - !GetAtt CodePipelineArtifactStoreBucket.Arn
+            - Effect: Allow
+              Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:GetObject
+              - s3:GetObjectVersion
+              Resource: 
+              - !Sub ${CodePipelineArtifactStoreBucket.Arn}/*
+        - PolicyName: CodePipelineLogging
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codepipeline/*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codepipeline/*:log-stream:*
+        - PolicyName: CodeStarSourceStage
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+              - codeconnections:UseConnection
+              - codestar-connections:UseConnection
+              Resource: !GetAtt GitHubConnection.ConnectionArn
+        - PolicyName: EksDeployStage
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement: 
+            - Effect: Allow
+              Action: eks:DescribeCluster
+              Resource: !GetAtt EksCluster.Arn
+            - Effect: Allow
+              Action:
+              - ec2:DescribeDhcpOptions
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeRouteTables
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeVpcs
+              - ec2:CreateNetworkInterface
+              - ec2:CreateNetworkInterfacePermission
+              - ec2:DeleteNetworkInterface
+              Resource: "*"
+            # - Effect: Allow
+            #   Action: ec2:CreateNetworkInterface
+            #   Resource: "*"
+            # - Effect: Allow
+            #   Action: ec2:CreateNetworkInterfacePermission
+            #   Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/eni-*
+            # - Effect: Allow
+            #   Action: ec2:DeleteNetworkInterface
+            #   Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/eni-*
+            # - Effect: Allow
+            #   Action:
+            #   - ec2:CreateNetworkInterface
+            #   - ec2:DeleteNetworkInterface
+            #   Resource: "*"
+            #   Condition: 
+            #     StringNotLike:
+            #       ec2:SubnetId: subnet-*
+            #       ec2:NetworkInterfaceId: eni-*
+        - PolicyName: CodeBuildStage
+          PolicyDocument: 
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+              - codebuild:BatchGetBuildBatches
+              - codebuild:StartBuildBatch
+              Resource:
+              - !GetAtt CodeBuildProject.Arn
+        # - PolicyName: EcrSourceStage
+        #   PolicyDocument:
+        #     Version: 2012-10-17
+        #     Statement:
+        #     - Effect: Allow
+        #       Action: ecr:DescribeImages
+        #       Resource: !GetAtt Ecr.Arn
+        - PolicyName: EcrBuildAndPublishBuildStage
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+              - ecr:DescribeRepositories
+              - ecr:GetAuthorizationToken
+              - ecr-public:DescribeRepositories
+              - ecr-public:GetAuthorizationToken
+              Resource: "*"
+            - Effect: Allow
+              Action:
+              - ecr:GetAuthorizationToken
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:PutImage
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchCheckLayerAvailability
+              Resource: "*"
+            - Effect: Allow
+              Action:
+              - ecr-public:GetAuthorizationToken
+              - ecr-public:DescribeRepositories
+              - ecr-public:InitiateLayerUpload
+              - ecr-public:UploadLayerPart
+              - ecr-public:CompleteLayerUpload
+              - ecr-public:PutImage
+              - ecr-public:BatchCheckLayerAvailability
+              - sts:GetServiceBearerToken
+              Resource: "*"
+            - Effect: Allow
+              Action:
+              - sts:GetServiceBearerToken
+              Resource: "*"
+        # - PolicyName: S3SourceStage
+        #   PolicyDocument:
+        #     Version: 2012-10-17
+        #     Statement:
+        #     - Effect: Allow
+        #       Action:
+        #       - s3:GetObject
+        #       - s3:GetObjectVersion
+        #       - s3:GetBucketVersioning
+        #       - s3:GetBucketAcl
+        #       - s3:GetBucketLocation
+        #       - s3:GetObjectTagging
+        #       - s3:GetObjectVersionTagging
+        #       Resource:
+        #       - !GetAtt S3Bucket.Arn
+        #       - !Sub ${S3Bucket.Arn}/*
+
+  S3EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: |
+        CodePipeline Source Stage에서 변경이 발생하면 파이프라인을 자동으로 시작하는 Amazon CloudWatch Events 규칙입니다. 
+        이 규칙을 삭제하면 해당 파이프라인에서 변경 사항이 감지되지 않습니다. 
+        자세한 정보 : http://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-about-starting.html
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - s3.amazonaws.com
+          eventName:
+            - CopyObject
+            - PutObject
+            - CompleteMultipartUpload
+          requestParameters:
+            bucketName:
+              - !Ref S3Bucket
+            key:
+              - src.zip
+      State: ENABLED
+      Targets:
+        - Id: codepipeline-s3-source
+          Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+          RoleArn: !GetAtt EventRuleIamRole.Arn
+  EventRuleIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelineS3SourcePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource:
+                  - !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn:
+      - CloudTrailLogsBucketPolicy
+    Properties:
+      TrailName: codepipeline-source-trail
+      EventSelectors: 
+        - DataResources: 
+            - Type: AWS::S3::Object
+              Values: 
+                - !Sub ${S3Bucket.Arn}/src.zip
+          ReadWriteType: WriteOnly
+      IsLogging: true
+      S3BucketName: !Ref CloudTrailLogsBucket
+  CloudTrailLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+  CloudTrailLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailLogsBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - s3:GetBucketAcl
+            Effect: Allow
+            Resource: !GetAtt CloudTrailLogsBucket.Arn
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/codepipeline-source-trail
+          - Action:
+              - s3:PutObject
+            Effect: Allow
+            Resource: !Sub ${CloudTrailLogsBucket.Arn}/AWSLogs/${AWS::AccountId}/*
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn: !Sub arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/codepipeline-source-trail
+  
+  SsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - VsCodeEc2 # Required
+      - CoreNodeGroup
+      - Nlb
+      - S3EventRule
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 600
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref VsCodeEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              su - ec2-user << 'SSMEOF'
+              export HOME=/home/ec2-user && cd $HOME
+              mkdir -p src/api
+              echo 'FROM python:3.13-slim
+              ENV USERNAME=AWS
+              ENV PYTHONUNBUFFERED=1
+              WORKDIR /src
+              COPY pyproject.toml .
+              COPY api api
+              RUN pip install poetry
+              RUN poetry config
+              RUN poetry install --no-root
+              ENTRYPOINT [ "poetry", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--reload" ]' > src/Dockerfile
+              echo 'from fastapi import FastAPI
+              import os
+              USERNAME = os.environ.get("USERNAME", "David")
+              app = FastAPI()
+              @app.get("/hello")
+              async def get_hello():
+                return {"message": f"Hello {USERNAME}"}
+              @app.get("/health")
+              async def get_health():
+                return {"message": "Healthy"}' > src/api/main.py
+              touch src/api/__init__.py
+              echo '[project]
+              name = "fastapi-app"
+              version = "0.1.0"
+              description = "sample"
+              authors = []
+              readme = "README.md"
+              requires-python = ">=3.13"
+              dependencies = [
+                  "fastapi (>=0.116.1,<0.117.0)",
+                  "uvicorn[standard] (>=0.35.0,<0.36.0)"
+              ]
+              [build-system]
+              requires = ["poetry-core>=2.0.0,<3.0.0"]
+              build-backend = "poetry.core.masonry.api"' > src/pyproject.toml
+              cd src
+              zip -r src.zip ./
+              aws s3 cp src.zip s3://${GitHubS3Bucket}/src.zip
+              SSMEOF
+
+  GitHubS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+  GitHubRepository:
+    Type: AWS::CodeStar::GitHubRepository
+    DependsOn:
+      - SsmAssociation
+    Properties:
+      EnableIssues: True
+      IsPrivate: False
+      RepositoryAccessToken: !Ref GitHubToken
+      RepositoryName: !Ref GitHubRepo
+      RepositoryOwner: !Ref GitHubUser
+      Code:
+        S3:
+          Bucket: !Ref GitHubS3Bucket
+          Key: "src.zip" 
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: github-connection
+      ProviderType: GitHub
+      Tags:
+        - Key: Status
+          Value: PendingHandshake
+  GitHubCredential:
+    Type: AWS::CodeBuild::SourceCredential
+    Properties:
+      AuthType: PERSONAL_ACCESS_TOKEN
+      ServerType: GITHUB
+      Token: !Ref GitHubToken
+      Username: !Ref GitHubUser
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${VsCodeEc2.PublicIp}:8000
+    Description: Public IP Address of the VS Code
+  LoadBalancerServiceDnsName:
+    Value: !Sub http://${Nlb.DNSName}/docs
+    Description: Kubernetes LoadBalancer Service DNS Name
+  CodeConnection:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/settings/connections
+    Description: CodeConnections 
