@@ -358,14 +358,12 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
   
-  NlbServiceSecurityGroup:
+  NlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security Group
       GroupName: nlb-sg
       SecurityGroupIngress:
-        - IpProtocol: -1
-          SourceSecurityGroupId: !GetAtt EksCluster.ClusterSecurityGroupId
         - !If [SecurityGroupInboundFromAnywhere, {
             "IpProtocol": "tcp",
             "FromPort": 80,
@@ -443,6 +441,7 @@ Resources:
     Type: AWS::SSM::Association
     DependsOn:
       - VsCodeEc2 # Required
+      - CoreNodeGroup
     Properties:
       Name: AWS-RunShellScript
       WaitForSuccessTimeoutSeconds: 600
@@ -459,6 +458,9 @@ Resources:
               aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}
               mkdir -p /home/ec2-user/manifests
 
+              kubectl rollout status -n kube-system deployment aws-load-balancer-controller
+              sleep 60
+
               echo '#!/bin/bash
               helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
               helm repo update ingress-nginx
@@ -468,9 +470,10 @@ Resources:
               --set controller.ingressClassResource.controllerValue=ingress.nginx/a \
               --set controller.service.type=LoadBalancer \
               --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"=a \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=nlb \
               --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-scheme"=internet-facing \
               --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-nlb-target-type"=ip \
+              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-security-groups"=${NlbSecurityGroup} \
+              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-manage-backend-security-group-rules"="true" \
               --wait
               
               helm upgrade --install ingress-nginx-b ingress-nginx/ingress-nginx -n kube-system \
@@ -478,9 +481,10 @@ Resources:
               --set controller.ingressClassResource.controllerValue=ingress.nginx/b \
               --set controller.service.type=LoadBalancer \
               --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"=b \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=nlb \
               --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-scheme"=internet-facing \
               --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-nlb-target-type"=ip \
+              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-security-groups"=${NlbSecurityGroup} \
+              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-manage-backend-security-group-rules"="true" \
               --wait' > /home/ec2-user/ingress_nginx_controller.sh && chmod +x /home/ec2-user/ingress_nginx_controller.sh && /home/ec2-user/ingress_nginx_controller.sh
 
               echo 'apiVersion: apps/v1
