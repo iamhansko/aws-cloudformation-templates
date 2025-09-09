@@ -233,7 +233,7 @@ Resources:
           --set region=${AWS::Region} \
           --set vpcId=${Vpc} \
           --wait
-          sleep 120
+          sleep 60
 
           git clone https://codeberg.org/hjacobs/kube-ops-view.git
           echo 'apiVersion: kustomize.config.k8s.io/v1beta1
@@ -304,7 +304,7 @@ Resources:
       AccessConfig: 
         AuthenticationMode: API_AND_CONFIG_MAP
         BootstrapClusterCreatorAdminPermissions: true
-      BootstrapSelfManagedAddons: true
+      BootstrapSelfManagedAddons: false
       Logging: 
         ClusterLogging: 
           EnabledTypes: 
@@ -371,6 +371,11 @@ Resources:
     Properties:
       AddonName: coredns
       ClusterName: !Ref EksCluster
+      ConfigurationValues: |
+        autoScaling:
+          enabled: true
+          minReplicas: 2
+          maxReplicas: 4
   MetricsServerAddOn:
     Type: AWS::EKS::Addon
     Properties:
@@ -390,7 +395,7 @@ Resources:
       NodeRole: !GetAtt EksNodeIamRole.Arn
       ScalingConfig: 
         DesiredSize: 2
-        MaxSize: 12
+        MaxSize: 80
         MinSize: 2
       Subnets: 
         - !Ref PrivateSubneta
@@ -508,36 +513,6 @@ Resources:
                   - "shield:CreateProtection"
                   - "shield:DeleteProtection"
                 Resource: "*"
-
-  SsmAssociation:
-    Type: AWS::SSM::Association
-    DependsOn:
-      - VsCodeEc2 # Required
-    Properties:
-      Name: AWS-RunShellScript
-      WaitForSuccessTimeoutSeconds: 300
-      Targets:
-        - Key: InstanceIds
-          Values:
-            - !Ref VsCodeEc2
-      Parameters:
-        commands: 
-          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
-          - !Sub |
-              su - ec2-user << 'SSMEOF'
-              export HOME=/home/ec2-user && cd $HOME
-              helm repo add cluster-proportional-autoscaler https://kubernetes-sigs.github.io/cluster-proportional-autoscaler
-              helm repo update
-              helm upgrade --install cluster-proportional-autoscaler cluster-proportional-autoscaler/cluster-proportional-autoscaler -n kube-system \
-              --set config.linear.nodesPerReplica=2 \
-              --set config.linear.min=2 \
-              --set config.linear.max=20 \
-              --set config.linear.preventSinglePointFailure="true" \
-              --set config.linear.includeUnschedulableNodes="true" \
-              --set options.target=deployment/coredns \
-              --set options.namespace=kube-system \
-              --wait
-              SSMEOF
 
 Outputs:
   VsCode:

@@ -304,7 +304,7 @@ Resources:
       AccessConfig: 
         AuthenticationMode: API_AND_CONFIG_MAP
         BootstrapClusterCreatorAdminPermissions: true
-      BootstrapSelfManagedAddons: true
+      BootstrapSelfManagedAddons: false
       Logging: 
         ClusterLogging: 
           EnabledTypes: 

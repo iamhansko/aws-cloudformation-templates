@@ -21,15 +21,12 @@ Mappings:
     a:
       PublicSubnetCidr: 10.0.0.0/24
       PrivateSubnetCidr: 10.0.1.0/24
-      PodSubnetCidr: 100.64.0.0/24
     b: 
       PublicSubnetCidr: 10.0.2.0/24
       PrivateSubnetCidr: 10.0.3.0/24
-      PodSubnetCidr: 100.64.1.0/24
     c: 
       PublicSubnetCidr: 10.0.4.0/24
       PrivateSubnetCidr: 10.0.5.0/24
-      PodSubnetCidr: 100.64.2.0/24
 
 Resources:
   KeyPair:
@@ -233,7 +230,7 @@ Resources:
           --set region=${AWS::Region} \
           --set vpcId=${Vpc} \
           --wait
-          sleep 120
+          sleep 60
 
           git clone https://codeberg.org/hjacobs/kube-ops-view.git
           echo 'apiVersion: kustomize.config.k8s.io/v1beta1
@@ -509,6 +506,67 @@ Resources:
                   - "shield:DeleteProtection"
                 Resource: "*"
 
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !GetAtt Vpc.DefaultSecurityGroup # Ignored
+      Subnets: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetb
+      Tags: 
+        - Key: elbv2.k8s.aws/cluster
+          Value: !Ref EksCluster
+        - Key: ingress.k8s.aws/resource
+          Value: LoadBalancer
+        - Key: ingress.k8s.aws/stack
+          Value: default/nginx
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: alb-sg
+      SecurityGroupIngress:
+        - !If [SecurityGroupInboundFromAnywhere, {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": "0.0.0.0/0"
+          }, !Ref AWS::NoValue]
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: alb-sg
+  KedaOperatorRole:
+    # https://keda.sh/docs/2.17/authentication-providers/aws/#using-keda-role-to-assume-workload-role-using-assumerolewithwebidentity
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Federated": "${EksOidcProvider.Arn}"
+                    },
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                        "StringEquals": {
+                            "${OidcProvider}:sub": "system:serviceaccount:keda:keda-operator",
+                            "${OidcProvider}:aud": "sts.amazonaws.com"
+                        }
+                    }
+                }
+            ]
+          }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess
+  
   SsmAssociation:
     Type: AWS::SSM::Association
     DependsOn:
@@ -526,12 +584,108 @@ Resources:
           - !Sub |
               su - ec2-user << 'SSMEOF'
               export HOME=/home/ec2-user && cd $HOME
-              git clone https://github.com/kubernetes/autoscaler.git
-              kubectl apply -f ./autoscaler/vertical-pod-autoscaler/deploy/vpa-v1-crd-gen.yaml
-              kubectl apply -f ./autoscaler/vertical-pod-autoscaler/deploy/vpa-rbac.yaml
-              chmod +x ./autoscaler/vertical-pod-autoscaler/hack/vpa-up.sh
-              ./autoscaler/vertical-pod-autoscaler/hack/vpa-up.sh
-              kubectl apply -f ./autoscaler/vertical-pod-autoscaler/examples/hamster.yaml
+              export KEDA_CHART_VERSION="2.17.2"
+              helm repo add kedacore https://kedacore.github.io/charts
+              helm repo update kedacore
+              helm upgrade --install keda kedacore/keda --namespace keda --create-namespace \
+              --version "$KEDA_CHART_VERSION" \
+              --set podIdentity.aws.irsa.enabled="true" \
+              --set podIdentity.aws.irsa.roleArn="{KedaOperatorRole.Arn}" \
+              --wait
+              mkdir -p /home/ec2-user/manifests
+              echo 'apiVersion: keda.sh/v1alpha1
+              kind: TriggerAuthentication
+              metadata:
+                name: aws-trigger-auth
+                namespace: default
+              spec:
+                podIdentity:
+                  provider: aws
+                  roleArn: ${KedaOperatorRole.Arn}
+                  identityOwner: keda
+              ---
+              apiVersion: keda.sh/v1alpha1
+              kind: ScaledObject
+              metadata:
+                name: cloudwatch-scaled-object
+                namespace: default
+              spec:
+                scaleTargetRef:
+                  apiVersion: apps/v1
+                  kind: Deployment
+                  name: nginx
+                pollingInterval: 30
+                cooldownPeriod: 300
+                minReplicaCount: 1
+                maxReplicaCount: 10
+                triggers:
+                  - type: aws-cloudwatch
+                    metadata:
+                      namespace: AWS/ApplicationELB
+                      expression: SELECT COUNT(RequestCount) FROM SCHEMA("AWS/ApplicationELB", LoadBalancer) WHERE LoadBalancer = \'${Alb.LoadBalancerFullName}\'
+                      metricStat: Sum
+                      metricStatPeriod: "60"
+                      metricUnit: Count
+                      targetMetricValue: "100"
+                      minMetricValue: "0"
+                      awsRegion: "${AWS::Region}"
+                    authenticationRef:
+                      name: aws-trigger-auth' > manifests/keda_trigger.yaml
+              echo 'apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: nginx
+              spec:
+                selector:
+                  matchLabels:
+                    app.kubernetes.io/name: nginx
+                replicas: 1
+                template:
+                  metadata:
+                    labels:
+                      app.kubernetes.io/name: nginx
+                  spec:
+                    containers:
+                    - image: nginxdemos/hello
+                      imagePullPolicy: Always
+                      name: nginx
+                      ports:
+                      - containerPort: 80
+              ---
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: nginx
+              spec:
+                ports:
+                  - port: 80
+                    targetPort: 80
+                    protocol: TCP
+                selector:
+                  app.kubernetes.io/name: nginx
+              ---
+              apiVersion: networking.k8s.io/v1
+              kind: Ingress
+              metadata:
+                name: nginx
+                annotations:
+                  alb.ingress.kubernetes.io/scheme: internet-facing
+                  alb.ingress.kubernetes.io/target-type: ip
+                  alb.ingress.kubernetes.io/security-groups: ${AlbSecurityGroup}
+                  alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
+              spec:
+                ingressClassName: alb
+                rules:
+                  - http:
+                      paths:
+                      - path: /
+                        pathType: Prefix
+                        backend:
+                          service:
+                            name: nginx
+                            port:
+                              number: 80' > manifests/keda_target.yaml
+              kubectl apply -f manifests || true
               SSMEOF
 
 Outputs:
@@ -541,3 +695,6 @@ Outputs:
   KubeOpsView:
     Value: !Sub http://${Nlb.DNSName}
     Description: Kubernetes LoadBalancer Service DNS Name
+  LoadGeneratorCommand:
+    Value: !Sub kubectl run load-generator --image=busybox -- /bin/sh -c "while true; do wget -q -O - http://${Alb.DNSName}; done"
+    Description: Create Load Generator Pod

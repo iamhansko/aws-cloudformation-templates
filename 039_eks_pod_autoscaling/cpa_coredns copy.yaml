@@ -390,7 +390,7 @@ Resources:
       NodeRole: !GetAtt EksNodeIamRole.Arn
       ScalingConfig: 
         DesiredSize: 2
-        MaxSize: 4
+        MaxSize: 12
         MinSize: 2
       Subnets: 
         - !Ref PrivateSubneta
@@ -515,7 +515,7 @@ Resources:
       - VsCodeEc2 # Required
     Properties:
       Name: AWS-RunShellScript
-      WaitForSuccessTimeoutSeconds: 600
+      WaitForSuccessTimeoutSeconds: 300
       Targets:
         - Key: InstanceIds
           Values:
@@ -526,12 +526,17 @@ Resources:
           - !Sub |
               su - ec2-user << 'SSMEOF'
               export HOME=/home/ec2-user && cd $HOME
-              git clone https://github.com/kubernetes/autoscaler.git
-              kubectl apply -f ./autoscaler/vertical-pod-autoscaler/deploy/vpa-v1-crd-gen.yaml
-              kubectl apply -f ./autoscaler/vertical-pod-autoscaler/deploy/vpa-rbac.yaml
-              chmod +x ./autoscaler/vertical-pod-autoscaler/hack/vpa-up.sh
-              ./autoscaler/vertical-pod-autoscaler/hack/vpa-up.sh
-              kubectl apply -f ./autoscaler/vertical-pod-autoscaler/examples/hamster.yaml
+              helm repo add cluster-proportional-autoscaler https://kubernetes-sigs.github.io/cluster-proportional-autoscaler
+              helm repo update
+              helm upgrade --install cluster-proportional-autoscaler cluster-proportional-autoscaler/cluster-proportional-autoscaler -n kube-system \
+              --set config.linear.nodesPerReplica=2 \
+              --set config.linear.min=2 \
+              --set config.linear.max=20 \
+              --set config.linear.preventSinglePointFailure="true" \
+              --set config.linear.includeUnschedulableNodes="true" \
+              --set options.target=deployment/coredns \
+              --set options.namespace=kube-system \
+              --wait
               SSMEOF
 
 Outputs:
