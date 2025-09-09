@@ -21,12 +21,15 @@ Mappings:
     a:
       PublicSubnetCidr: 10.0.0.0/24
       PrivateSubnetCidr: 10.0.1.0/24
+      PodSubnetCidr: 100.64.0.0/24
     b: 
       PublicSubnetCidr: 10.0.2.0/24
       PrivateSubnetCidr: 10.0.3.0/24
+      PodSubnetCidr: 100.64.1.0/24
     c: 
       PublicSubnetCidr: 10.0.4.0/24
       PrivateSubnetCidr: 10.0.5.0/24
+      PodSubnetCidr: 100.64.2.0/24
 
 Resources:
   KeyPair:
@@ -144,6 +147,7 @@ Resources:
     Type: AWS::EC2::Instance
     DependsOn:
       - CoreNodeGroup
+      - Nlb
     CreationPolicy:
       ResourceSignal:
         Count: '1'                
@@ -220,8 +224,6 @@ Resources:
           chmod 700 /home/ec2-user/get_helm.sh
           /home/ec2-user/get_helm.sh
 
-          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
-
           helm repo add eks https://aws.github.io/eks-charts
           helm repo update eks
           helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
@@ -231,12 +233,39 @@ Resources:
           --set region=${AWS::Region} \
           --set vpcId=${Vpc} \
           --wait
+          sleep 120
+
+          git clone https://codeberg.org/hjacobs/kube-ops-view.git
+          echo 'apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - deployment.yaml
+            - rbac.yaml
+            - service.yaml
+            - redis-deployment.yaml
+            - redis-service.yaml
+          patches:
+            - path: patch.yaml' > kube-ops-view/deploy/kustomization.yaml
+          echo 'apiVersion: v1
+          kind: Service
+          metadata:
+            annotations:
+              service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+              service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+              service.beta.kubernetes.io/aws-load-balancer-security-groups: ${NlbSecurityGroup.GroupId}
+              service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+            name: kube-ops-view
+          spec:
+            type: LoadBalancer' > kube-ops-view/deploy/patch.yaml
+          kubectl apply -k kube-ops-view/deploy
           EOF
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
   VsCodeEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security Group
-      GroupName: bastion-sg
+      GroupName: vscode-sg
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         !If [SecurityGroupInboundFromAnywhere, [{
@@ -247,7 +276,7 @@ Resources:
         }], []]
       Tags:
         - Key: Name
-          Value: bastion-sg
+          Value: vscode-sg
   VsCodeEc2IamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -267,7 +296,7 @@ Resources:
     Properties:
       Roles: 
         - !Ref VsCodeEc2IamRole
-
+  
   EksCluster:
     Type: AWS::EKS::Cluster
     Properties:
@@ -293,6 +322,23 @@ Resources:
           - !Ref PrivateSubneta
           - !Ref PrivateSubnetb
       RoleArn: !GetAtt EksClusterIamRole.Arn
+      KubernetesNetworkConfig:
+        IpFamily: ipv4
+        ServiceIpv4Cidr: 172.20.0.0/16
+  EksClusterIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
   VsCodeEc2IamAccessEntry:
     Type: AWS::EKS::AccessEntry
     Properties:
@@ -309,6 +355,27 @@ Resources:
       Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
       ClientIdList: 
         - sts.amazonaws.com
+  
+  VpcCniAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: vpc-cni
+      ClusterName: !Ref EksCluster
+  KubeProxyAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: kube-proxy
+      ClusterName: !Ref EksCluster
+  CoreDnsAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: coredns
+      ClusterName: !Ref EksCluster
+  MetricsServerAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: metrics-server
+      ClusterName: !Ref EksCluster
 
   CoreNodeGroup:
     Type: AWS::EKS::Nodegroup
@@ -323,25 +390,11 @@ Resources:
       NodeRole: !GetAtt EksNodeIamRole.Arn
       ScalingConfig: 
         DesiredSize: 2
-        MaxSize: 4
+        MaxSize: 12
         MinSize: 2
       Subnets: 
         - !Ref PrivateSubneta
         - !Ref PrivateSubnetb
-  EksClusterIamRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - eks.amazonaws.com
-            Action:
-              - sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
   EksNodeIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -360,6 +413,23 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
   
+  Nlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: network
+      Scheme: internet-facing
+      SecurityGroups:
+        - !GetAtt Vpc.DefaultSecurityGroup # Ignored
+      Subnets: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetb
+      Tags: 
+        - Key: elbv2.k8s.aws/cluster
+          Value: !Ref EksCluster
+        - Key: service.k8s.aws/resource
+          Value: LoadBalancer
+        - Key: service.k8s.aws/stack
+          Value: default/kube-ops-view
   NlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -438,14 +508,14 @@ Resources:
                   - "shield:CreateProtection"
                   - "shield:DeleteProtection"
                 Resource: "*"
-  
+
   SsmAssociation:
     Type: AWS::SSM::Association
     DependsOn:
       - VsCodeEc2 # Required
     Properties:
       Name: AWS-RunShellScript
-      WaitForSuccessTimeoutSeconds: 600
+      WaitForSuccessTimeoutSeconds: 300
       Targets:
         - Key: InstanceIds
           Values:
@@ -456,178 +526,23 @@ Resources:
           - !Sub |
               su - ec2-user << 'SSMEOF'
               export HOME=/home/ec2-user && cd $HOME
-              aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}
-              mkdir -p /home/ec2-user/manifests
-
-              kubectl rollout status -n kube-system deployment aws-load-balancer-controller
-              sleep 120
-
-              echo '#!/bin/bash
-              helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-              helm repo update ingress-nginx
-
-              helm upgrade --install ingress-nginx-a ingress-nginx/ingress-nginx -n kube-system \
-              --set controller.ingressClassResource.name=a \
-              --set controller.ingressClassResource.controllerValue=ingress.nginx/a \
-              --set controller.service.type=LoadBalancer \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"=a \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-scheme"=internet-facing \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-nlb-target-type"=ip \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-security-groups"=${NlbSecurityGroup} \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-manage-backend-security-group-rules"="true" \
+              helm repo add cluster-proportional-autoscaler https://kubernetes-sigs.github.io/cluster-proportional-autoscaler
+              helm repo update
+              helm upgrade --install cluster-proportional-autoscaler cluster-proportional-autoscaler/cluster-proportional-autoscaler -n kube-system \
+              --set config.linear.nodesPerReplica=2 \
+              --set config.linear.min=2 \
+              --set config.linear.max=20 \
+              --set config.linear.preventSinglePointFailure="true" \
+              --set config.linear.includeUnschedulableNodes="true" \
+              --set options.target=deployment/coredns \
+              --set options.namespace=kube-system \
               --wait
-              
-              helm upgrade --install ingress-nginx-b ingress-nginx/ingress-nginx -n kube-system \
-              --set controller.ingressClassResource.name=b \
-              --set controller.ingressClassResource.controllerValue=ingress.nginx/b \
-              --set controller.service.type=LoadBalancer \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"=b \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-scheme"=internet-facing \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-nlb-target-type"=ip \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-security-groups"=${NlbSecurityGroup} \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-manage-backend-security-group-rules"="true" \
-              --wait' > /home/ec2-user/ingress_nginx_controller.sh && chmod +x /home/ec2-user/ingress_nginx_controller.sh && /home/ec2-user/ingress_nginx_controller.sh
-
-              echo 'apiVersion: apps/v1
-              kind: Deployment
-              metadata:
-                name: todo
-              spec:
-                replicas: 1
-                selector:
-                  matchLabels:
-                    app: todo-app
-                template:
-                  metadata:
-                    labels:
-                      app: todo-app
-                  spec:
-                    containers:
-                    - name: fastapi
-                      image: sce06147/fastapi-todo-app:latest
-                      ports:
-                      - containerPort: 8000
-                      command:
-                        - "bash"
-                        - "-c"
-                        - "poetry run python -m api.migrate_db && poetry run uvicorn api.main:app --host 0.0.0.0 --root-path /v1"
-                      env:
-                      - name: WATCHFILES_FORCE_POLLING
-                        value: "true"
-                      - name: DB_HOST
-                        value: "localhost"
-                      - name: DB_PORT
-                        value: "3306"
-                    - name: mysql
-                      image: mysql:8.0
-                      ports:
-                      - containerPort: 3306
-                      env:
-                      - name: MYSQL_ALLOW_EMPTY_PASSWORD
-                        value: "yes"
-                      - name: MYSQL_DATABASE
-                        value: "demo"
-                      - name: TZ
-                        value: "Asia/Seoul"
-                      volumeMounts:
-                      - name: gp3-volume
-                        mountPath: /var/lib/mysql
-                    - name: dnsutils
-                      image: registry.k8s.io/e2e-test-images/agnhost:2.39
-                    restartPolicy: Always
-                    volumes:
-                    - name: gp3-volume
-                      persistentVolumeClaim:
-                        claimName: gp3-pvc
-              ---
-              apiVersion: v1
-              kind: Service
-              metadata:
-                name: todo-service
-              spec:
-                selector:
-                  app: todo-app
-                ports:
-                - port: 8000
-                  targetPort: 8000
-              ---
-              apiVersion: networking.k8s.io/v1
-              kind: Ingress
-              metadata:
-                name: ingress
-                annotations:
-                  nginx.ingress.kubernetes.io/rewrite-target: "/$1"
-              spec:
-                ingressClassName: a
-                rules:
-                  - http:
-                      paths:
-                      - path: /v1/(.*)
-                        pathType: ImplementationSpecific
-                        backend:
-                          service:
-                            name: todo-service
-                            port:
-                              number: 8000
-              ---
-              apiVersion: storage.k8s.io/v1
-              kind: StorageClass
-              metadata:
-                name: gp3
-              parameters:
-                type: gp3
-              provisioner: ebs.csi.aws.com
-              reclaimPolicy: Delete
-              volumeBindingMode: WaitForFirstConsumer
-              ---
-              apiVersion: v1
-              kind: PersistentVolumeClaim
-              metadata:
-                name: gp3-pvc
-              spec:
-                accessModes:
-                  - ReadWriteOnce
-                storageClassName: gp3
-                resources:
-                  requests:
-                    storage: 3Gi' > /home/ec2-user/manifests/fastapi.yaml && kubectl apply -f /home/ec2-user/manifests/fastapi.yaml
               SSMEOF
-  
-  EbsCsiDriverAddon:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: aws-ebs-csi-driver
-      ClusterName: !Ref EksCluster
-      ServiceAccountRoleArn: !GetAtt EbsCsiDriverAddonIamRole.Arn
-  EbsCsiDriverAddonIamRole:
-    Type: AWS::IAM::Role
-    Properties:
-      # https://docs.aws.amazon.com/ko_kr/eks/latest/userguide/ebs-csi.html
-      AssumeRolePolicyDocument: !Sub
-        - |
-          {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Principal": {
-                        "Federated": "${EksOidcProvider.Arn}"
-                    },
-                    "Action": "sts:AssumeRoleWithWebIdentity",
-                    "Condition": {
-                        "StringEquals": {
-                            "${OidcProvider}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa",
-                            "${OidcProvider}:aud": "sts.amazonaws.com"
-                        }
-                    }
-                }
-            ]
-          }
-        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
-      ManagedPolicyArns: 
-        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
 
 Outputs:
   VsCode:
     Value: !Sub http://${VsCodeEc2.PublicIp}:8000
     Description: Public IP Address of the VS Code
+  KubeOpsView:
+    Value: !Sub http://${Nlb.DNSName}
+    Description: Kubernetes LoadBalancer Service DNS Name
