@@ -1,17 +1,11 @@
 Transform: AWS::LanguageExtensions
 Parameters:
-  KubecostUser:
+  RancherPassword:
     Type: String
-    Description: Kubecost Dashboard User
-    Default: kubecost
+    Description: Rancher Dashboard Password
+    Default: rancher
     AllowedPattern: ".+"
-    ConstraintDescription: "Parameter [KubecostUser] is empty"
-  KubecostPassword:
-    Type: String
-    Description: Kubecost Dashboard Password
-    Default: kubecost
-    AllowedPattern: ".+"
-    ConstraintDescription: "Parameter [KubecostPassword] is empty"
+    ConstraintDescription: "Parameter [RancherPassword] is empty"
   InboundFromAnywhere:
     Type: String
     Default: "False"
@@ -409,7 +403,7 @@ Resources:
         - Key: service.k8s.aws/resource
           Value: LoadBalancer
         - Key: service.k8s.aws/stack
-          Value: kubecost/ingress-nginx-controller
+          Value: kube-system/ingress-nginx-controller
   NlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -418,8 +412,8 @@ Resources:
       SecurityGroupIngress:
         - !If [SecurityGroupInboundFromAnywhere, {
             "IpProtocol": "tcp",
-            "FromPort": 80,
-            "ToPort": 80,
+            "FromPort": 443,
+            "ToPort": 443,
             "CidrIp": "0.0.0.0/0"
           }, !Ref AWS::NoValue]
       VpcId: !Ref Vpc
@@ -489,45 +483,10 @@ Resources:
                   - "shield:DeleteProtection"
                 Resource: "*"
 
-  EbsCsiDriverAddon:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: aws-ebs-csi-driver
-      ClusterName: !Ref EksCluster
-      ServiceAccountRoleArn: !GetAtt EbsCsiDriverAddonIamRole.Arn
-  EbsCsiDriverAddonIamRole:
-    Type: AWS::IAM::Role
-    Properties:
-      # https://docs.aws.amazon.com/ko_kr/eks/latest/userguide/ebs-csi.html
-      AssumeRolePolicyDocument: !Sub
-        - |
-          {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Principal": {
-                        "Federated": "${EksOidcProvider.Arn}"
-                    },
-                    "Action": "sts:AssumeRoleWithWebIdentity",
-                    "Condition": {
-                        "StringEquals": {
-                            "${OidcProvider}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa",
-                            "${OidcProvider}:aud": "sts.amazonaws.com"
-                        }
-                    }
-                }
-            ]
-          }
-        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
-      ManagedPolicyArns: 
-        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
-
   SsmAssociation:
     Type: AWS::SSM::Association
     DependsOn:
       - VsCodeEc2 # Required
-      - EbsCsiDriverAddon
     Properties:
       Name: AWS-RunShellScript
       WaitForSuccessTimeoutSeconds: 600
@@ -539,70 +498,36 @@ Resources:
         commands: 
           # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
           - !Sub |
-              dnf install -yq httpd-tools
               su - ec2-user << 'SSMEOF'
               export HOME=/home/ec2-user && cd $HOME
-              kubectl -n kube-system rollout status deployment ebs-csi-controller
-              kubectl -n kube-system rollout status daemonset ebs-csi-node
-              sleep 10
-              mkdir -p /home/ec2-user/manifests
-              echo 'apiVersion: storage.k8s.io/v1
-              kind: StorageClass
-              metadata:
-                name: gp3
-                annotations:
-                  storageclass.kubernetes.io/is-default-class: "true"
-              parameters:
-                type: gp3
-              provisioner: ebs.csi.aws.com
-              reclaimPolicy: Delete
-              volumeBindingMode: WaitForFirstConsumer' > manifests/gp3_storageclass.yaml
-              kubectl apply -f manifests/gp3_storageclass.yaml
+              
               helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
               helm repo update ingress-nginx
-              helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx -n kubecost --create-namespace \
+              helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx -n kube-system \
               --set controller.service.type=LoadBalancer \
               --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-scheme"=internet-facing \
               --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-nlb-target-type"=ip \
               --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-security-groups"="${NlbSecurityGroup}\, ${EksCluster.ClusterSecurityGroupId}" \
               --wait
               sleep 10
-              export KUBECOST_VERSION="2.8.3"
-              helm upgrade --install kubecost oci://public.ecr.aws/kubecost/cost-analyzer --namespace kubecost --create-namespace \
-              --version $KUBECOST_VERSION \
-              -f https://raw.githubusercontent.com/kubecost/cost-analyzer-helm-chart/v$KUBECOST_VERSION/cost-analyzer/values-eks-cost-monitoring.yaml \
+
+              helm repo add jetstack https://charts.jetstack.io
+              helm repo update jetstack
+              helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace --set crds.enabled=true --wait
+              
+              helm repo add rancher https://releases.rancher.com/server-charts/latest
+              helm repo update rancher
+              helm upgrade --install rancher rancher/rancher -n cattle-system --create-namespace \
+              --set hostname="${Nlb.DNSName}" \
+              --set ingress.ingressClassName=nginx \
+              --set bootstrapPassword=${RancherPassword} \
               --wait
-              htpasswd -c -b auth ${KubecostUser} ${KubecostPassword}
-              kubectl -n kubecost create secret generic basic-auth --from-file=auth
-              # https://kubernetes.github.io/ingress-nginx/examples/auth/basic/
-              echo "apiVersion: networking.k8s.io/v1
-              kind: Ingress
-              metadata:
-                name: kubecost
-                namespace: kubecost
-                annotations:
-                  nginx.ingress.kubernetes.io/auth-type: basic
-                  nginx.ingress.kubernetes.io/auth-secret: basic-auth
-                  nginx.ingress.kubernetes.io/auth-realm: 'Authentication Required'
-              spec:
-                ingressClassName: nginx
-                rules:
-                  - http:
-                      paths:
-                        - path: /
-                          pathType: Prefix
-                          backend:
-                            service:
-                              name: kubecost-cost-analyzer
-                              port:
-                                number: 9090" > manifests/kubecost_ingress.yaml
-              kubectl apply -f manifests/kubecost_ingress.yaml
               SSMEOF
 
 Outputs:
   VsCode:
     Value: !Sub http://${VsCodeEc2.PublicIp}:8000
     Description: Public IP Address of the VS Code
-  Kubecost:
-    Value: !Sub http://${Nlb.DNSName}
-    Description: Kubecost Dashboard
+  Rancher:
+    Value: !Sub https://${Nlb.DNSName}/dashboard/?setup=${RancherPassword}
+    Description: Rancher Dashboard
