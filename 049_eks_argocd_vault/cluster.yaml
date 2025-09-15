@@ -1,0 +1,1252 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  GitHubUser:
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubUser] must not be empty
+  GitHubRepo:
+    Type: String
+    Default: sample-eks-argocd
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubRepo] must not be empty
+  GitHubToken:
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubToken] must not be empty
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SeucirtyGroup Inbound Rule (Source 0.0.0.0/0)
+  KubernetesVersion:
+    Description: EKS Cluster Kubernetes Version (1.XX)
+    Type: String
+    Default: "1.33"
+    AllowedValues: ["1.31", "1.32", "1.33"]
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, b]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, b]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - CoreNodeGroup
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT7M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !GetAtt EksCluster.ClusterSecurityGroupId
+            - !Ref VsCodeEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git
+          dnf groupinstall -yq "Development Tools"
+
+          export VSC_VERSION="4.102.3"
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          sudo -Eu ec2-user bash << 'EOF'
+          cd /home/ec2-user
+          mkdir -p /home/ec2-user/bin
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.3/2025-08-03/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          mv kubectl /home/ec2-user/bin/kubectl
+          export PATH=/home/ec2-user/bin:$PATH
+          echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+          echo "alias k=kubectl" >> ~/.bashrc
+          echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+          echo "source <(kubectl completion bash)" >> ~/.bashrc
+          exec bash
+          aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}
+
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+
+          curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
+          chmod 700 /home/ec2-user/get_helm.sh
+          /home/ec2-user/get_helm.sh
+
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update eks
+          helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
+          --set clusterName=${EksCluster} \
+          --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${AWSLoadBalancerControllerRole.Arn}" \
+          --set serviceAccount.name=aws-load-balancer-controller \
+          --set region=${AWS::Region} \
+          --set vpcId=${Vpc} \
+          --wait
+          sleep 60
+
+          kubectl -n kube-system rollout status deployment ebs-csi-controller
+          kubectl -n kube-system rollout status daemonset ebs-csi-node
+          sleep 10
+          mkdir -p /home/ec2-user/manifests
+          echo 'apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: gp3
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "true"
+          parameters:
+            type: gp3
+          provisioner: ebs.csi.aws.com
+          reclaimPolicy: Delete
+          volumeBindingMode: WaitForFirstConsumer' > manifests/gp3_storageclass.yaml
+          kubectl apply -f manifests/gp3_storageclass.yaml
+
+          EOF
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vscode-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: vscode-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref VsCodeEc2IamRole
+  
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Version: !Ref KubernetesVersion
+      AccessConfig: 
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      BootstrapSelfManagedAddons: false
+      Logging: 
+        ClusterLogging: 
+          EnabledTypes: 
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      ResourcesVpcConfig: 
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: true
+        SubnetIds: 
+          - !Ref PublicSubneta
+          - !Ref PublicSubnetb
+          - !Ref PrivateSubneta
+          - !Ref PrivateSubnetb
+      RoleArn: !GetAtt EksClusterIamRole.Arn
+      KubernetesNetworkConfig:
+        IpFamily: ipv4
+        ServiceIpv4Cidr: 172.20.0.0/16
+  EksClusterIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  VsCodeEc2IamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      AccessPolicies: 
+        - AccessScope: 
+            Type: cluster
+          PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt VsCodeEc2IamRole.Arn
+      Type: STANDARD
+  EksOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList: 
+        - sts.amazonaws.com
+  
+  VpcCniAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: vpc-cni
+      ClusterName: !Ref EksCluster
+  KubeProxyAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: kube-proxy
+      ClusterName: !Ref EksCluster
+  CoreDnsAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: coredns
+      ClusterName: !Ref EksCluster
+
+  CoreNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: core-nodegroup
+      AmiType: AL2023_x86_64_STANDARD
+      InstanceTypes: 
+        - t3.medium #c5.large
+      CapacityType: ON_DEMAND
+      ClusterName: !Ref EksCluster
+      ForceUpdateEnabled: true
+      NodeRole: !GetAtt EksNodeIamRole.Arn
+      ScalingConfig: 
+        DesiredSize: 2
+        MaxSize: 4
+        MinSize: 2
+      Subnets: 
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetb
+  EksNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  vault:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: vault
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !GetAtt Vpc.DefaultSecurityGroup # Ignored
+      Subnets: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetb
+      Tags: 
+        - Key: elbv2.k8s.aws/cluster
+          Value: !Ref EksCluster
+        - Key: ingress.k8s.aws/resource
+          Value: LoadBalancer
+        - Key: ingress.k8s.aws/stack
+          Value: vault/vault
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: alb-sg
+      SecurityGroupIngress:
+        - !If [SecurityGroupInboundFromAnywhere, {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": "0.0.0.0/0"
+          }, !Ref AWS::NoValue]
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: alb-sg
+  argocd:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: argocd
+      Type: network
+      Scheme: internet-facing
+      SecurityGroups:
+        - !GetAtt Vpc.DefaultSecurityGroup # Ignored
+      Subnets: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetb
+      Tags: 
+        - Key: elbv2.k8s.aws/cluster
+          Value: !Ref EksCluster
+        - Key: service.k8s.aws/resource
+          Value: LoadBalancer
+        - Key: service.k8s.aws/stack
+          Value: argocd/argocd-server
+  NlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: nlb-sg
+      SecurityGroupIngress:
+        - !If [SecurityGroupInboundFromAnywhere, {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": "0.0.0.0/0"
+          }, !Ref AWS::NoValue]
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: nlb-sg
+  AWSLoadBalancerControllerRole:
+    # https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Federated": "${EksOidcProvider.Arn}"
+                    },
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                        "StringEquals": {
+                            "${OidcProvider}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller",
+                            "${OidcProvider}:aud": "sts.amazonaws.com"
+                        }
+                    }
+                }
+            ]
+          }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: AWSLoadBalancerControllerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "iam:CreateServiceLinkedRole"
+                Resource: "*"
+                Condition:
+                  StringEquals: 
+                    "iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"
+              - Effect: "Allow"
+                Action: 
+                  - "ec2:*"
+                  - "elasticloadbalancing:*"
+                Resource: "*"
+              - Effect: "Allow"
+                Action: 
+                  - "cognito-idp:DescribeUserPoolClient"
+                  - "acm:ListCertificates"
+                  - "acm:DescribeCertificate"
+                  - "iam:ListServerCertificates"
+                  - "iam:GetServerCertificate"
+                  - "waf-regional:GetWebACL"
+                  - "waf-regional:GetWebACLForResource"
+                  - "waf-regional:AssociateWebACL"
+                  - "waf-regional:DisassociateWebACL"
+                  - "wafv2:GetWebACL"
+                  - "wafv2:GetWebACLForResource"
+                  - "wafv2:AssociateWebACL"
+                  - "wafv2:DisassociateWebACL"
+                  - "shield:GetSubscriptionState"
+                  - "shield:DescribeProtection"
+                  - "shield:CreateProtection"
+                  - "shield:DeleteProtection"
+                Resource: "*"
+  
+  EbsCsiDriverAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: aws-ebs-csi-driver
+      ClusterName: !Ref EksCluster
+      ServiceAccountRoleArn: !GetAtt EbsCsiDriverAddonIamRole.Arn
+  EbsCsiDriverAddonIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # https://docs.aws.amazon.com/ko_kr/eks/latest/userguide/ebs-csi.html
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Federated": "${EksOidcProvider.Arn}"
+                    },
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                        "StringEquals": {
+                            "${OidcProvider}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa",
+                            "${OidcProvider}:aud": "sts.amazonaws.com"
+                        }
+                    }
+                }
+            ]
+          }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+
+  GitHubRepository:
+    Type: AWS::CodeStar::GitHubRepository
+    DependsOn:
+      - GitHubSsmAssociation
+    Properties:
+      EnableIssues: True
+      IsPrivate: False
+      RepositoryAccessToken: !Ref GitHubToken
+      RepositoryName: !Ref GitHubRepo
+      RepositoryOwner: !Ref GitHubUser
+      Code:
+        S3:
+          Bucket: !Ref GitHubS3Bucket
+          Key: "src.zip" 
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: github-connection
+      ProviderType: GitHub
+  GitHubCredential:
+    Type: AWS::CodeBuild::SourceCredential
+    Properties:
+      AuthType: PERSONAL_ACCESS_TOKEN
+      ServerType: GITHUB
+      Token: !Ref GitHubToken
+      Username: !Ref GitHubUser
+  GitHubS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub
+        - "github-source-bucket-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  GitHubSsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - VsCodeEc2
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 900
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref VsCodeEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub 
+              - |
+                su - ec2-user << EOF
+                mkdir -p /home/ec2-user/${GitHubRepo}/.github/workflows
+                mkdir -p /home/ec2-user/${GitHubRepo}/manifest
+                cd /home/ec2-user/${GitHubRepo}
+
+                echo 'apiVersion: apps/v1
+                kind: Deployment
+                metadata:
+                  name: nginx-deploy
+                  labels:
+                    app: nginx
+                spec:
+                  replicas: 3
+                  selector:
+                    matchLabels:
+                      app: nginx
+                  template:
+                    metadata:
+                      labels:
+                        app: nginx
+                    spec:
+                      containers:
+                      - name: nginx
+                        image: nginx:latest
+                        env:
+                        - name: ADMIN_USER
+                          value: <path:kv/data/admin#user>
+                        - name: ADMIN_PASSWORD
+                          value: <path:kv/data/admin#password>
+                ' > ./manifest/deployment.yaml
+
+                echo 'apiVersion: v1
+                kind: Service
+                metadata:
+                  name: nginx-service
+                spec:
+                  selector:
+                    app: nginx
+                  ports:
+                    - protocol: TCP
+                      port: 80
+                      targetPort: 80' > ./manifest/service.yaml
+
+                echo 'apiVersion: networking.k8s.io/v1
+                kind: Ingress
+                metadata:
+                  name: nginx-ingress
+                  annotations:
+                    alb.ingress.kubernetes.io/load-balancer-name: sample
+                    alb.ingress.kubernetes.io/scheme: internet-facing
+                    alb.ingress.kubernetes.io/target-type: ip
+                spec:
+                  ingressClassName: alb
+                  rules:
+                  - http:
+                      paths:
+                      - path: /
+                        pathType: Prefix
+                        backend:
+                          service:
+                            name: nginx-service
+                            port:
+                              number: 80' > ./manifest/ingress.yaml
+
+                zip -r src.zip . "./*"
+                aws s3 cp src.zip s3://${GitHubS3Bucket}
+
+                EOF
+              - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  SsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - VsCodeEc2 # Required
+      - argocd
+      - vault
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 1200
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref VsCodeEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          # https://argocd-vault-plugin.readthedocs.io/en/stable/usage/
+          - !Sub |
+              su - ec2-user << 'SSMEOF'
+              export HOME=/home/ec2-user && cd $HOME
+
+              helm repo add hashicorp https://helm.releases.hashicorp.com
+              helm repo update hashicorp
+              helm install vault hashicorp/vault -n vault --create-namespace \
+              --set ingress.enabled="true" \
+              --set ingress.ingressClassName="alb" \
+              --set ingress.annotations."alb\.ingress\.kubernetes\.io/scheme"=internet-facing \
+              --set ingress.annotations."alb\.ingress\.kubernetes\.io/target-type"=ip \
+              --set ingress.annotations."alb\.ingress\.kubernetes\.io/security-groups"="${AlbSecurityGroup}\, ${EksCluster.ClusterSecurityGroupId}" \
+              --wait
+              sleep 10
+              kubectl -n vault exec vault-0 -- vault operator init -key-shares=1 -key-threshold=1 -format=json > vault_token.json
+              export VAULT_INITIAL_ROOT_TOKEN=$(cat vault_token.json | jq -r ".root_token")
+              echo $'apiVersion: v1
+              kind: Secret
+              metadata:
+                name: vault
+                namespace: argocd
+              type: Opaque
+              stringData:
+                VAULT_ADDR: http://vault.vault:8200
+                VAULT_TOKEN: $VAULT_INITIAL_ROOT_TOKEN
+                AVP_AUTH_TYPE: token
+                AVP_TYPE: vault
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: argocd-repo-server
+                namespace: argocd
+              rules:
+              - apiGroups: [""]
+                resources: ["secrets"]
+                resourceNames: ["vault"]
+                verbs: ["get"]
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: argocd-repo-server
+                namespace: argocd
+              roleRef:
+                apiGroup: rbac.authorization.k8s.io
+                kind: Role
+                name: argocd-repo-server
+              subjects:
+              - kind: ServiceAccount
+                name: argocd-repo-server' > manifests/vault.yaml
+              kubectl apply -f manifests/vault.yaml
+              kubectl -n vault exec vault-0 -- vault login $VAULT_INITIAL_ROOT_TOKEN
+              # kubectl -n vault exec vault-0 -- vault secrets enable kv-v2
+              # kubectl -n vault exec vault-0 -- vault kv put admin name="hyunsu" password="hyunsu1234"
+
+              curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+              sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+              rm argocd-linux-amd64
+
+              kubectl create namespace argocd
+              kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+              sleep 10
+              kubectl -n argocd annotate service argocd-server service.beta.kubernetes.io/aws-load-balancer-scheme="internet-facing"
+              kubectl -n argocd annotate service argocd-server service.beta.kubernetes.io/aws-load-balancer-nlb-target-type="ip"
+              kubectl -n argocd annotate service argocd-server service.beta.kubernetes.io/aws-load-balancer-security-groups="${NlbSecurityGroup}\, ${EksCluster.ClusterSecurityGroupId}"
+              kubectl -n argocd patch service argocd-server -p '{"spec": {"type": "LoadBalancer"}}'
+              sleep 60
+
+              echo 'apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: cmp-plugin
+              data:
+                plugin.yaml: |
+                  apiVersion: argoproj.io/v1alpha1
+                  kind: ConfigManagementPlugin
+                  metadata:
+                    name: argocd-vault-plugin
+                  spec:
+                    allowConcurrency: true
+                    discover:
+                      find:
+                        command:
+                          - sh
+                          - "-c"
+                          - "find . -name \"*.yaml\""
+                    generate:
+                      command:
+                        - argocd-vault-plugin
+                        - generate
+                        - -s
+                        - vault
+                        - "."
+                    lockRepo: false
+              ---
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                labels:
+                  app.kubernetes.io/component: repo-server
+                  app.kubernetes.io/name: argocd-repo-server
+                  app.kubernetes.io/part-of: argocd
+                name: argocd-repo-server
+              spec:
+                selector:
+                  matchLabels:
+                    app.kubernetes.io/name: argocd-repo-server
+                template:
+                  metadata:
+                    labels:
+                      app.kubernetes.io/name: argocd-repo-server
+                  spec:
+                    affinity:
+                      podAntiAffinity:
+                        preferredDuringSchedulingIgnoredDuringExecution:
+                        - podAffinityTerm:
+                            labelSelector:
+                              matchLabels:
+                                app.kubernetes.io/name: argocd-repo-server
+                            topologyKey: kubernetes.io/hostname
+                          weight: 100
+                        - podAffinityTerm:
+                            labelSelector:
+                              matchLabels:
+                                app.kubernetes.io/part-of: argocd
+                            topologyKey: kubernetes.io/hostname
+                          weight: 5
+                    automountServiceAccountToken: true
+                    containers:
+                    - name: avp
+                      command: [/var/run/argocd/argocd-cmp-server]
+                      image: registry.access.redhat.com/ubi8
+                      securityContext:
+                        runAsNonRoot: true
+                        runAsUser: 999
+                      volumeMounts:
+                        - mountPath: /var/run/argocd
+                          name: var-files
+                        - mountPath: /home/argocd/cmp-server/plugins
+                          name: plugins
+                        - mountPath: /tmp
+                          name: tmp
+                        # Register plugins into sidecar
+                        - mountPath: /home/argocd/cmp-server/config/plugin.yaml
+                          subPath: plugin.yaml
+                          name: cmp-plugin
+                        # Important: Mount tools into $PATH
+                        - name: custom-tools
+                          subPath: argocd-vault-plugin
+                          mountPath: /usr/local/bin/argocd-vault-plugin
+                    - args:
+                      - /usr/local/bin/argocd-repo-server
+                      env:
+                      - name: REDIS_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            key: auth
+                            name: argocd-redis
+                      - name: ARGOCD_RECONCILIATION_TIMEOUT
+                        valueFrom:
+                          configMapKeyRef:
+                            key: timeout.reconciliation
+                            name: argocd-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_LOGFORMAT
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.log.format
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_LOGLEVEL
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.log.level
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_LOG_FORMAT_TIMESTAMP
+                        valueFrom:
+                          configMapKeyRef:
+                            key: log.format.timestamp
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_PARALLELISM_LIMIT
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.parallelism.limit
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_LISTEN_ADDRESS
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.listen.address
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_LISTEN_METRICS_ADDRESS
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.metrics.listen.address
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_DISABLE_TLS
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.disable.tls
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_TLS_MIN_VERSION
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.tls.minversion
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_TLS_MAX_VERSION
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.tls.maxversion
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_TLS_CIPHERS
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.tls.ciphers
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_CACHE_EXPIRATION
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.repo.cache.expiration
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: REDIS_SERVER
+                        valueFrom:
+                          configMapKeyRef:
+                            key: redis.server
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: REDIS_COMPRESSION
+                        valueFrom:
+                          configMapKeyRef:
+                            key: redis.compression
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: REDISDB
+                        valueFrom:
+                          configMapKeyRef:
+                            key: redis.db
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_DEFAULT_CACHE_EXPIRATION
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.default.cache.expiration
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_OTLP_ADDRESS
+                        valueFrom:
+                          configMapKeyRef:
+                            key: otlp.address
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_OTLP_INSECURE
+                        valueFrom:
+                          configMapKeyRef:
+                            key: otlp.insecure
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_OTLP_HEADERS
+                        valueFrom:
+                          configMapKeyRef:
+                            key: otlp.headers
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_OTLP_ATTRS
+                        valueFrom:
+                          configMapKeyRef:
+                            key: otlp.attrs
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_MAX_COMBINED_DIRECTORY_MANIFESTS_SIZE
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.max.combined.directory.manifests.size
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_PLUGIN_TAR_EXCLUSIONS
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.plugin.tar.exclusions
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_PLUGIN_USE_MANIFEST_GENERATE_PATHS
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.plugin.use.manifest.generate.paths
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_ALLOW_OUT_OF_BOUNDS_SYMLINKS
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.allow.oob.symlinks
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_STREAMED_MANIFEST_MAX_TAR_SIZE
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.streamed.manifest.max.tar.size
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_STREAMED_MANIFEST_MAX_EXTRACTED_SIZE
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.streamed.manifest.max.extracted.size
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_HELM_MANIFEST_MAX_EXTRACTED_SIZE
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.helm.manifest.max.extracted.size
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_DISABLE_HELM_MANIFEST_MAX_EXTRACTED_SIZE
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.disable.helm.manifest.max.extracted.size
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_OCI_MANIFEST_MAX_EXTRACTED_SIZE
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.oci.manifest.max.extracted.size
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_DISABLE_OCI_MANIFEST_MAX_EXTRACTED_SIZE
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.disable.oci.manifest.max.extracted.size
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_OCI_LAYER_MEDIA_TYPES
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.oci.layer.media.types
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REVISION_CACHE_LOCK_TIMEOUT
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.revision.cache.lock.timeout
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_GIT_MODULES_ENABLED
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.enable.git.submodule
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_GIT_LS_REMOTE_PARALLELISM_LIMIT
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.git.lsremote.parallelism.limit
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_GIT_REQUEST_TIMEOUT
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.git.request.timeout
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_GRPC_MAX_SIZE_MB
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.grpc.max.size
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: ARGOCD_REPO_SERVER_INCLUDE_HIDDEN_DIRECTORIES
+                        valueFrom:
+                          configMapKeyRef:
+                            key: reposerver.include.hidden.directories
+                            name: argocd-cmd-params-cm
+                            optional: true
+                      - name: HELM_CACHE_HOME
+                        value: /helm-working-dir
+                      - name: HELM_CONFIG_HOME
+                        value: /helm-working-dir
+                      - name: HELM_DATA_HOME
+                        value: /helm-working-dir
+                      image: quay.io/argoproj/argocd:v3.1.5
+                      imagePullPolicy: Always
+                      livenessProbe:
+                        failureThreshold: 3
+                        httpGet:
+                          path: /healthz?full=true
+                          port: 8084
+                        initialDelaySeconds: 30
+                        periodSeconds: 30
+                        timeoutSeconds: 5
+                      name: argocd-repo-server
+                      ports:
+                      - containerPort: 8081
+                      - containerPort: 8084
+                      readinessProbe:
+                        httpGet:
+                          path: /healthz
+                          port: 8084
+                        initialDelaySeconds: 5
+                        periodSeconds: 10
+                      securityContext:
+                        allowPrivilegeEscalation: false
+                        capabilities:
+                          drop:
+                          - ALL
+                        readOnlyRootFilesystem: true
+                        runAsNonRoot: true
+                        seccompProfile:
+                          type: RuntimeDefault
+                      volumeMounts:
+                      - mountPath: /app/config/ssh
+                        name: ssh-known-hosts
+                      - mountPath: /app/config/tls
+                        name: tls-certs
+                      - mountPath: /app/config/gpg/source
+                        name: gpg-keys
+                      - mountPath: /app/config/gpg/keys
+                        name: gpg-keyring
+                      - mountPath: /app/config/reposerver/tls
+                        name: argocd-repo-server-tls
+                      - mountPath: /tmp
+                        name: tmp
+                      - mountPath: /helm-working-dir
+                        name: helm-working-dir
+                      - mountPath: /home/argocd/cmp-server/plugins
+                        name: plugins
+                    initContainers:
+                    - name: download-tools
+                      image: registry.access.redhat.com/ubi8
+                      env:
+                        - name: AVP_VERSION
+                          value: 1.16.1
+                      command: [sh, -c]
+                      args:
+                        - >-
+                          curl -L https://github.com/argoproj-labs/argocd-vault-plugin/releases/download/v$(AVP_VERSION)/argocd-vault-plugin_$(AVP_VERSION)_linux_amd64 -o argocd-vault-plugin &&
+                          chmod +x argocd-vault-plugin &&
+                          mv argocd-vault-plugin /custom-tools/
+                      volumeMounts:
+                        - mountPath: /custom-tools
+                          name: custom-tools
+                    - command:
+                      - /bin/cp
+                      - -n
+                      - /usr/local/bin/argocd
+                      - /var/run/argocd/argocd-cmp-server
+                      image: quay.io/argoproj/argocd:v3.1.5
+                      name: copyutil
+                      securityContext:
+                        allowPrivilegeEscalation: false
+                        capabilities:
+                          drop:
+                          - ALL
+                        readOnlyRootFilesystem: true
+                        runAsNonRoot: true
+                        seccompProfile:
+                          type: RuntimeDefault
+                      volumeMounts:
+                      - mountPath: /var/run/argocd
+                        name: var-files
+                    nodeSelector:
+                      kubernetes.io/os: linux
+                    serviceAccountName: argocd-repo-server
+                    volumes:
+                    - name: cmp-plugin
+                      configMap:
+                        name: cmp-plugin
+                    - name: custom-tools
+                      emptyDir: {}
+                    - configMap:
+                        name: argocd-ssh-known-hosts-cm
+                      name: ssh-known-hosts
+                    - configMap:
+                        name: argocd-tls-certs-cm
+                      name: tls-certs
+                    - configMap:
+                        name: argocd-gpg-keys-cm
+                      name: gpg-keys
+                    - emptyDir: {}
+                      name: gpg-keyring
+                    - emptyDir: {}
+                      name: tmp
+                    - emptyDir: {}
+                      name: helm-working-dir
+                    - name: argocd-repo-server-tls
+                      secret:
+                        items:
+                        - key: tls.crt
+                          path: tls.crt
+                        - key: tls.key
+                          path: tls.key
+                        - key: ca.crt
+                          path: ca.crt
+                        optional: true
+                        secretName: argocd-repo-server-tls
+                    - emptyDir: {}
+                      name: var-files
+                    - emptyDir: {}
+                      name: plugins
+              ' > manifests/argocd_vault_plugin.yaml
+              kubectl -n argocd apply -f manifests/argocd_vault_plugin.yaml
+              kubectl -n argocd rollout restart deployment argocd-repo-server
+              kubectl -n argocd rollout restart deployment argocd-redis
+              sleep 10
+
+              echo '#!/bin/bash
+              export ARGOCD_SERVER_DOMAIN=$(kubectl get svc -n argocd argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+              export ARGOCD_SERVER_PASSWORD=$(argocd admin initial-password -n argocd | cut -d " " -f1 | tr -d "\n")
+              echo $ARGOCD_SERVER_PASSWORD > argocd_password.txt
+              argocd login $ARGOCD_SERVER_DOMAIN --insecure --username admin --password $ARGOCD_SERVER_PASSWORD
+              sleep 10
+              argocd cluster add $(kubectl config get-contexts -o name) -y
+              kubectl config set-context --current --namespace=argocd
+              argocd app create argo-app \
+              --sync-policy automated --self-heal \
+              --repo https://github.com/${GitHubUser}/${GitHubRepo}.git \
+              --path manifest \
+              --dest-server https://kubernetes.default.svc \
+              --dest-namespace default \
+              --config-management-plugin argocd-vault-plugin
+              # argocd app sync argo-app
+              kubectl config set-context --current --namespace=default' > argocd.sh
+              chmod +x argocd.sh
+              # ./argocd.sh
+
+              SSMEOF
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${VsCodeEc2.PublicIp}:8000
+    Description: Public IP Address of the VS Code

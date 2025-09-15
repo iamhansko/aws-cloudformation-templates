@@ -1,0 +1,1 @@
+# EKS ArgoCD + Vault Plugin
