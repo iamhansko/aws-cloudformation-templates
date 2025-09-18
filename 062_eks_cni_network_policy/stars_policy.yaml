@@ -499,10 +499,15 @@ Resources:
               export HOME=/home/ec2-user && cd $HOME
 
               mkdir -p /home/ec2-user/manifests
-              kubectl apply -f https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/create_resources.files/namespace.yaml
-              kubectl apply -f https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/create_resources.files/backend.yaml
-              kubectl apply -f https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/create_resources.files/frontend.yaml
-              kubectl apply -f https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/create_resources.files/client.yaml
+              cd manifests
+              curl -O https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/create_resources.files/namespace.yaml
+              curl -O https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/create_resources.files/backend.yaml
+              curl -O https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/create_resources.files/frontend.yaml
+              curl -O https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/create_resources.files/client.yaml
+              kubectl apply -f namespace.yaml
+              kubectl apply -f backend.yaml
+              kubectl apply -f frontend.yaml
+              kubectl apply -f client.yaml
               # kubectl apply -f https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/create_resources.files/management-ui.yaml
               echo 'apiVersion: v1
               kind: Namespace
@@ -519,7 +524,7 @@ Resources:
                 annotations:
                   service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
                   service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
-                  service.beta.kubernetes.io/aws-load-balancer-security-groups: "${NlbSecurityGroup.GroupId}\, ${EksCluster.ClusterSecurityGroupId}"
+                  service.beta.kubernetes.io/aws-load-balancer-security-groups: ${NlbSecurityGroup.GroupId}, ${EksCluster.ClusterSecurityGroupId}
               spec:
                 type: LoadBalancer
                 ports:
@@ -548,22 +553,58 @@ Resources:
                       image: calico/star-collect:v0.1.0
                       imagePullPolicy: Always
                       ports:
-                      - containerPort: 9001' > manifests/management_ui.yaml
-              kubectl apply -f manifests/management_ui.yaml
+                      - containerPort: 9001' > management-ui.yaml
+              kubectl apply -f management-ui.yaml
 
-              cd manifests
               curl -O https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/apply_network_policies.files/default-deny.yaml
               curl -O https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/apply_network_policies.files/allow-ui.yaml
               curl -O https://raw.githubusercontent.com/aws-samples/eks-workshop/2f9d29ed3f82ed6b083649e975a0e574fb8a4058/content/beginner/120_network-policies/calico/stars_policy_demo/apply_network_policies.files/allow-ui-client.yaml
+              echo 'kind: NetworkPolicy
+              apiVersion: networking.k8s.io/v1
+              metadata:
+                namespace: stars
+                name: backend-policy
+              spec:
+                podSelector:
+                  matchLabels:
+                    role: backend
+                ingress:
+                  - from:
+                      - podSelector:
+                          matchLabels:
+                            role: frontend
+                    ports:
+                      - protocol: TCP
+                        port: 6379' > backend-policy.yaml
+              echo 'kind: NetworkPolicy
+              apiVersion: networking.k8s.io/v1
+              metadata:
+                namespace: stars
+                name: frontend-policy
+              spec:
+                podSelector:
+                  matchLabels:
+                    role: frontend
+                ingress:
+                  - from:
+                      - namespaceSelector:
+                          matchLabels:
+                            role: client
+                    ports:
+                      - protocol: TCP
+                        port: 80' > frontend-policy.yaml
+
               echo 'VPC CNI Network Policy
 
               https://docs.aws.amazon.com/ko_kr/eks/latest/userguide/network-policy-stars-demo.html
               
               ```
-              kubectl apply -n stars -f default-deny.yaml
-              kubectl apply -n client -f default-deny.yaml
-              kubectl apply -f allow-ui.yaml
-              kubectl apply -f allow-ui-client.yaml
+              kubectl apply -n stars -f /home/ec2-user/manifests/default-deny.yaml
+              kubectl apply -n client -f /home/ec2-user/manifests/default-deny.yaml
+              kubectl apply -f /home/ec2-user/manifests/allow-ui.yaml
+              kubectl apply -f /home/ec2-user/manifests/allow-ui-client.yaml
+              kubectl apply -f /home/ec2-user/manifests/backend-policy.yaml
+              kubectl apply -f /home/ec2-user/manifests/frontend-policy.yaml
               ```' > README.md
               SSMEOF
 

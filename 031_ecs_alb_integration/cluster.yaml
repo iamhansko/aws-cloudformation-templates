@@ -338,9 +338,23 @@ Resources:
             su - ec2-user << EOF
             cd /home/ec2-user
             aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
-            git clone https://github.com/iamhansko/aws-cloudformation-templates.git
-            mv aws-cloudformation-templates/030_ecs_alb_integration/src/* /home/ec2-user/
+            echo 'from flask import Flask
+            app = Flask(__name__)
 
+            @app.route("/")
+            def index():
+              return "Hello ECS"
+
+            @app.route("/health")
+            def healthcheck():
+              return "Healthy"
+
+            @app.route("/error")
+            def error():
+              return "Server Error", 500
+
+            if __name__ == "__main__":
+              app.run(host="0.0.0.0", port=80)' > monitoring.py
             echo 'FROM python:3.13-slim
             WORKDIR /app
             COPY monitoring.py .

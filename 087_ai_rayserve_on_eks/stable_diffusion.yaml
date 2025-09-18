@@ -1011,7 +1011,7 @@ Resources:
                 Condition: 
                   StringEquals:
                     "aws:ResourceTag/k8s.io/cluster-autoscaler/enabled": "true"
-                    "aws:ResourceTag/k8s.io/cluster-autoscaler/${EksCluster}": "owned"
+                    # "aws:ResourceTag/k8s.io/cluster-autoscaler/${EksCluster}": "owned"
               - Effect: "Allow"
                 Action:
                   - "autoscaling:DescribeAutoScalingInstances"

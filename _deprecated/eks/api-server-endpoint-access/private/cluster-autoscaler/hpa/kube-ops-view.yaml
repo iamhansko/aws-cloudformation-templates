@@ -435,7 +435,8 @@ Resources:
             Resource: "*"
             Condition: 
               StringEquals:
-                "aws:ResourceTag/k8s.io/cluster-autoscaler/${EksCluster}": "owned"
+                "aws:ResourceTag/k8s.io/cluster-autoscaler/enabled": "true"
+                # "aws:ResourceTag/k8s.io/cluster-autoscaler/${EksCluster}": "owned"
           - Sid: "VisualEditor1"
             Effect: "Allow"
             Action:
