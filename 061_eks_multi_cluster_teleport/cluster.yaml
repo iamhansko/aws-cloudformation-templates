@@ -1,5 +1,14 @@
 Transform: AWS::LanguageExtensions
 Parameters:
+  TeleportDomainName:
+    Type: String
+    Description: Teleport Domain Name
+  TeleportRoute53HostedZone:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Teleport Domain Name
+  TeleportIssuerEmail:
+    Type: String
+    Description: Teleport Issuer Email Address
   InboundFromAnywhere:
     Type: String
     Default: "False"
@@ -56,19 +65,6 @@ Resources:
     Properties:
       InternetGatewayId: !Ref InternetGateway
       VpcId: !Ref Vpc
-  PublicSubnetRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      Tags:
-        - Key: Name
-          Value: public-rt
-      VpcId: !Ref Vpc
-  PublicSubnetRoute:
-    Type: AWS::EC2::Route
-    Properties:
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
-      RouteTableId: !Ref PublicSubnetRouteTable
 
   # PublicSubnets
   Fn::ForEach::PublicSubnets:
@@ -90,6 +86,19 @@ Resources:
           RouteTableId: !Ref PublicSubnetRouteTable
           SubnetId:
             Ref: !Sub PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
   
   # PrivateSubnets
   Fn::ForEach::PrivateSubnets:
@@ -224,7 +233,7 @@ Resources:
           helm repo update eks
           helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
           --set clusterName=${EksCluster} \
-          --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${AWSLoadBalancerControllerRole.Arn}" \
+          --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${AwsLoadBalancerControllerRole.Arn}" \
           --set serviceAccount.name=aws-load-balancer-controller \
           --set region=${AWS::Region} \
           --set vpcId=${Vpc} \
@@ -351,14 +360,14 @@ Resources:
       AmiType: AL2023_x86_64_STANDARD
       InstanceTypes: 
         - t3.medium #c5.large
-      CapacityType: SPOT
+      CapacityType: ON_DEMAND
       ClusterName: !Ref EksCluster
       ForceUpdateEnabled: true
       NodeRole: !GetAtt EksNodeIamRole.Arn
       ScalingConfig: 
-        DesiredSize: 3
-        MaxSize: 6
-        MinSize: 3
+        DesiredSize: 2
+        MaxSize: 4
+        MinSize: 2
       Subnets: 
         - !Ref PrivateSubneta
         - !Ref PrivateSubnetb
@@ -379,8 +388,156 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: TeleportDynamoDBPolicy
+          PolicyDocument: !Sub |
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Sid": "ClusterStateStorage",
+                        "Effect": "Allow",
+                        "Action": [
+                            "dynamodb:BatchWriteItem",
+                            "dynamodb:UpdateTimeToLive",
+                            "dynamodb:PutItem",
+                            "dynamodb:DeleteItem",
+                            "dynamodb:Scan",
+                            "dynamodb:Query",
+                            "dynamodb:DescribeStream",
+                            "dynamodb:UpdateItem",
+                            "dynamodb:DescribeTimeToLive",
+                            "dynamodb:DescribeTable",
+                            "dynamodb:GetShardIterator",
+                            "dynamodb:GetItem",
+                            "dynamodb:ConditionCheckItem",
+                            "dynamodb:UpdateTable",
+                            "dynamodb:GetRecords",
+                            "dynamodb:UpdateContinuousBackups"
+                        ],
+                        "Resource": [
+                            "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/teleport-helm-backend",
+                            "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/teleport-helm-backend/stream/*"
+                        ]
+                    },
+                    {
+                        "Sid": "ClusterEventsStorage",
+                        "Effect": "Allow",
+                        "Action": [
+                            "dynamodb:BatchWriteItem",
+                            "dynamodb:UpdateTimeToLive",
+                            "dynamodb:PutItem",
+                            "dynamodb:DescribeTable",
+                            "dynamodb:DeleteItem",
+                            "dynamodb:GetItem",
+                            "dynamodb:Scan",
+                            "dynamodb:Query",
+                            "dynamodb:UpdateItem",
+                            "dynamodb:DescribeTimeToLive",
+                            "dynamodb:UpdateTable",
+                            "dynamodb:UpdateContinuousBackups"
+                        ],
+                        "Resource": [
+                            "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/teleport-helm-events",
+                            "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/teleport-helm-events/index/*"
+                        ]
+                    }
+                ]
+            }
+        - PolicyName: TeleportS3Policy
+          PolicyDocument: !Sub |
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Sid": "BucketActions",
+                        "Effect": "Allow",
+                        "Action": [
+                            "s3:PutEncryptionConfiguration",
+                            "s3:PutBucketVersioning",
+                            "s3:ListBucketVersions",
+                            "s3:ListBucketMultipartUploads",
+                            "s3:ListBucket",
+                            "s3:GetEncryptionConfiguration",
+                            "s3:GetBucketVersioning",
+                            "s3:CreateBucket"
+                        ],
+                        "Resource": "arn:aws:s3:::${TeleportSessionS3Bucket}"
+                    },
+                    {
+                        "Sid": "ObjectActions",
+                        "Effect": "Allow",
+                        "Action": [
+                            "s3:GetObjectVersion",
+                            "s3:GetObjectRetention",
+                            "s3:*Object",
+                            "s3:ListMultipartUploadParts",
+                            "s3:AbortMultipartUpload"
+                        ],
+                        "Resource": "arn:aws:s3:::${TeleportSessionS3Bucket}/*"
+                    }
+                ]
+            }
+        - PolicyName: TeleportRoute53Policy
+          PolicyDocument: !Sub |
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": "route53:GetChange",
+                        "Resource": "arn:aws:route53:::change/*"
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "route53:ChangeResourceRecordSets",
+                            "route53:ListResourceRecordSets"
+                        ],
+                        "Resource": "arn:aws:route53:::hostedzone/${TeleportRoute53HostedZone}"
+                    }
+                ]
+            }
+  
+  TeleportSessionS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
 
-  AWSLoadBalancerControllerRole:
+  # Nlb:
+  #   Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+  #   Properties:
+  #     Name: grafana
+  #     Type: network
+  #     Scheme: internet-facing
+  #     SecurityGroups:
+  #       - !GetAtt Vpc.DefaultSecurityGroup # Ignored
+  #     Subnets: 
+  #       - !Ref PublicSubneta
+  #       - !Ref PublicSubnetb
+  #     Tags: 
+  #       - Key: elbv2.k8s.aws/cluster
+  #         Value: !Ref EksCluster
+  #       - Key: service.k8s.aws/resource
+  #         Value: LoadBalancer
+  #       - Key: service.k8s.aws/stack
+  #         Value: kube-system/ingress-nginx-controller
+  # NlbSecurityGroup:
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: Security Group
+  #     GroupName: nlb-sg
+  #     SecurityGroupIngress:
+  #       - !If [SecurityGroupInboundFromAnywhere, {
+  #           "IpProtocol": "tcp",
+  #           "FromPort": 80,
+  #           "ToPort": 80,
+  #           "CidrIp": "0.0.0.0/0"
+  #         }, !Ref AWS::NoValue]
+  #     VpcId: !Ref Vpc
+  #     Tags:
+  #       - Key: Name
+  #         Value: nlb-sg
+  AwsLoadBalancerControllerRole:
     # https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
     Type: AWS::IAM::Role
     Properties:
@@ -406,43 +563,43 @@ Resources:
           }
         - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
       Policies:
-        - PolicyName: AWSLoadBalancerControllerPolicy
+        - PolicyName: AwsLoadBalancerControllerPolicy
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: 2012-10-17
             Statement:
-              - Effect: "Allow"
+              - Effect: Allow
                 Action:
-                  - "iam:CreateServiceLinkedRole"
+                  - iam:CreateServiceLinkedRole
                 Resource: "*"
                 Condition:
                   StringEquals: 
-                    "iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"
-              - Effect: "Allow"
+                    "iam:AWSServiceName": elasticloadbalancing.amazonaws.com
+              - Effect: Allow
                 Action: 
-                  - "ec2:*"
-                  - "elasticloadbalancing:*"
+                  - ec2:*
+                  - elasticloadbalancing:*
                 Resource: "*"
-              - Effect: "Allow"
+              - Effect: Allow
                 Action: 
-                  - "cognito-idp:DescribeUserPoolClient"
-                  - "acm:ListCertificates"
-                  - "acm:DescribeCertificate"
-                  - "iam:ListServerCertificates"
-                  - "iam:GetServerCertificate"
-                  - "waf-regional:GetWebACL"
-                  - "waf-regional:GetWebACLForResource"
-                  - "waf-regional:AssociateWebACL"
-                  - "waf-regional:DisassociateWebACL"
-                  - "wafv2:GetWebACL"
-                  - "wafv2:GetWebACLForResource"
-                  - "wafv2:AssociateWebACL"
-                  - "wafv2:DisassociateWebACL"
-                  - "shield:GetSubscriptionState"
-                  - "shield:DescribeProtection"
-                  - "shield:CreateProtection"
-                  - "shield:DeleteProtection"
+                  - cognito-idp:DescribeUserPoolClient
+                  - acm:ListCertificates
+                  - acm:DescribeCertificate
+                  - iam:ListServerCertificates
+                  - iam:GetServerCertificate
+                  - waf-regional:GetWebACL
+                  - waf-regional:GetWebACLForResource
+                  - waf-regional:AssociateWebACL
+                  - waf-regional:DisassociateWebACL
+                  - wafv2:GetWebACL
+                  - wafv2:GetWebACLForResource
+                  - wafv2:AssociateWebACL
+                  - wafv2:DisassociateWebACL
+                  - shield:GetSubscriptionState
+                  - shield:DescribeProtection
+                  - shield:CreateProtection
+                  - shield:DeleteProtection
                 Resource: "*"
-  
+
   SsmAssociation:
     Type: AWS::SSM::Association
     DependsOn:
@@ -458,83 +615,105 @@ Resources:
         commands: 
           # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
           - !Sub |
-              su - ec2-user << 'SSMEOF'
-              export HOME=/home/ec2-user && cd $HOME
-              aws configure set region ${AWS::Region}
+            su - ec2-user << 'SSMEOF'
+            export HOME=/home/ec2-user && cd $HOME
+            helm repo add jetstack https://charts.jetstack.io
+            helm repo update jetstack
+            helm upgrade --install cert-manager jetstack/cert-manager -n cert-manager --create-namespace \
+            --set installCRDs=true \
+            --set global.leaderElection.namespace=cert-manager \
+            --set extraArgs="{--issuer-ambient-credentials}"
+            mkdir -p /home/ec2-user/manifests
+            cat << EOF > manifests/issuer.yaml
+            apiVersion: cert-manager.io/v1
+            kind: Issuer
+            metadata:
+              name: letsencrypt
+              namespace: kube-system
+            spec:
+              acme:
+                email: ${TeleportIssuerEmail}
+                server: https://acme-v02.api.letsencrypt.org/directory
+                privateKeySecretRef:
+                  name: letsencrypt
+                solvers:
+                - selector:
+                    dnsZones:
+                      - "${TeleportDomainName}"
+                  dns01:
+                    route53:
+                      region: ${AWS::Region}
+                      hostedZoneID: ${TeleportRoute53HostedZone}
+            EOF
+            kubectl apply -f manifests/issuer.yaml
 
-              echo $'#!/bin/bash
-              helm upgrade --install aws-node-termination-handler oci://public.ecr.aws/aws-ec2/helm/aws-node-termination-handler -n kube-system \
-              --set enableSpotInterruptionDraining="true" \
-              --set enableRebalanceMonitoring="true" \
-              --set enableRebalanceDraining="true" \
-              --set enableScheduledEventDraining="true" \
-              --wait' > install_nth.sh
-              chmod +x install_nth.sh
-              ./install_nth.sh
+            cat << EOF > manifests/values.yaml
+            chartMode: aws
+            clusterName: ${TeleportDomainName}
+            proxyListenerMode: multiplex
+            aws:
+              region: ${AWS::Region}
+              backendTable: teleport-helm-backend
+              auditLogTable: teleport-helm-events
+              auditLogMirrorOnStdout: false
+              sessionRecordingBucket: ${TeleportSessionS3Bucket}
+              backups: true
+              dynamoAutoScaling: false
+            highAvailability:
+              replicaCount: 2
+              certManager:
+                enabled: true
+                issuerName: letsencrypt
+            enterprise: false                                  
+            podSecurityPolicy:
+              enabled: false
+            EOF
+            helm repo add teleport https://charts.releases.teleport.dev
+            helm repo update teleport
+            helm upgrade --install teleport teleport/teleport-cluster -n kube-system -f manifests/values.yaml --wait
 
-              mkdir -p /home/ec2-user/manifests
-              echo 'apiVersion: apps/v1
-              kind: Deployment
-              metadata:
-                labels:
-                  app: nginx
-                name: nginx
-              spec:
-                replicas: 12
-                selector:
-                  matchLabels:
-                    app: nginx
-                template:
-                  metadata:
-                    creationTimestamp: null
-                    labels:
-                      app: nginx
-                  spec:
-                    containers:
-                    - image: nginx
-                      name: nginx' > /home/ec2-user/manifests/nginx.yaml
-              kubectl apply -f /home/ec2-user/manifests/nginx.yaml
+            MYZONE="$(aws route53 list-hosted-zones-by-name --dns-name="${TeleportDomainName}" | jq -r '.HostedZones[0].Id' | sed s_/hostedzone/__)"
+            MYELB="$(kubectl -n kube-system get "service/teleport-proxy" -o jsonpath='{.status.loadBalancer.ingress[*].hostname}')"
+            MYELB_NAME="${!MYELB%%-*}"
+            MYELB_ZONE="$(aws elbv2 describe-load-balancers --region "${AWS::Region}" --names "${!MYELB_NAME?}" | jq -r '.LoadBalancers[0].CanonicalHostedZoneId')"
+            jq -n --arg dns "teleport.${TeleportDomainName}" --arg elb "${!MYELB?}" --arg elbz "${!MYELB_ZONE?}" \
+            '{
+                "Comment": "Create records",
+                "Changes": [
+                  {
+                    "Action": "CREATE",
+                    "ResourceRecordSet": {
+                      "Name": $dns,
+                      "Type": "A",
+                      "AliasTarget": {
+                        "HostedZoneId": $elbz,
+                        "DNSName": ("dualstack." + $elb),
+                        "EvaluateTargetHealth": false
+                      }
+                    }
+                  },
+                  {
+                    "Action": "CREATE",
+                    "ResourceRecordSet": {
+                      "Name": ("*." + $dns),
+                      "Type": "A",
+                      "AliasTarget": {
+                        "HostedZoneId": $elbz,
+                        "DNSName": ("dualstack." + $elb),
+                        "EvaluateTargetHealth": false
+                      }
+                    }
+                  }
+              ]
+            }' > myrecords.json
+            cat myrecords.json | jq
+            CHANGEID="$(aws route53 change-resource-record-sets --hosted-zone-id "${!MYZONE?}" --change-batch file://myrecords.json | jq -r '.ChangeInfo.Id')"
+            aws route53 get-change --id "${!CHANGEID?}" | jq '.ChangeInfo.Status'
+            kubectl -n kube-system exec deploy/teleport-auth -- tctl users add test --roles=access,editor
 
-              wget -O eks-node-viewer https://github.com/awslabs/eks-node-viewer/releases/download/v0.7.4/eks-node-viewer_Linux_x86_64
-              chmod +x eks-node-viewer
-              sudo mv -v eks-node-viewer /usr/local/bin
-
-              wget https://github.com/aws/amazon-ec2-spot-interrupter/releases/download/v0.0.10/ec2-spot-interrupter_0.0.10_Linux_amd64.tar.gz
-              tar -xvzf ec2-spot-interrupter_0.0.10_Linux_amd64.tar.gz
-              chmod +x ec2-spot-interrupter
-              sudo mv -v ec2-spot-interrupter /usr/local/bin
-
-              SSMEOF
-
-  FisIamRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: aws-fis-itn
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - fis.amazonaws.com
-            Action:
-              - sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSFaultInjectionSimulatorEC2Access
-      Policies:
-        - PolicyName: aws-fis-policy
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - fis:*
-                Resource: "*"
+            SSMEOF
 
 Outputs:
   VsCode:
     Value: !Sub http://${VsCodeEc2.PublicIp}:8000
     Description: Public IP Address of the VS Code
-  Commands:
-    Value: !Sub ec2-spot-interrupter -d 13m -i SPOT_INSTANCE_ID -r ${AWS::Region}
-    Description: https://github.com/aws/amazon-ec2-spot-interrupter
