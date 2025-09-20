@@ -5,3 +5,4 @@
 - [Teleport 애플리케이션 액세스를 통한 AWS 액세스](https://teleport-docs.infograb.net/enroll-resources/application-access/cloud-apis/aws-console/)
 - [Securing EKS with Teleport](https://www.youtube.com/watch?v=GlMEnK1yfKo)
 - [Teleport EKS Auto-Discovery](https://goteleport.com/docs/enroll-resources/auto-discovery/kubernetes/aws/)
+- [Running an HA Teleport cluster using AWS, EKS, and Helm](https://goteleport.com/docs/zero-trust-access/deploy-a-cluster/helm-deployments/aws/)

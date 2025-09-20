@@ -1,0 +1,1062 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SeucirtyGroup Inbound Rule (Source 0.0.0.0/0)
+  KubernetesVersion:
+    Description: EKS Cluster Kubernetes Version (1.XX)
+    Type: String
+    Default: "1.33"
+    AllowedValues: ["1.31", "1.32", "1.33"]
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, b]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, b]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - CoreNodeGroup
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT7M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !GetAtt EksCluster.ClusterSecurityGroupId
+            - !Ref VsCodeEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git
+          dnf groupinstall -yq "Development Tools"
+
+          export VSC_VERSION="4.102.3"
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          sudo -Eu ec2-user bash << 'EOF'
+          cd /home/ec2-user
+          mkdir -p /home/ec2-user/bin
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.3/2025-08-03/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          mv kubectl /home/ec2-user/bin/kubectl
+          export PATH=/home/ec2-user/bin:$PATH
+          echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+          echo "alias k=kubectl" >> ~/.bashrc
+          echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+          echo "source <(kubectl completion bash)" >> ~/.bashrc
+          exec bash
+          aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}
+
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+
+          curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
+          chmod 700 /home/ec2-user/get_helm.sh
+          /home/ec2-user/get_helm.sh
+
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update eks
+          helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
+          --set clusterName=${EksCluster} \
+          --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${AWSLoadBalancerControllerRole.Arn}" \
+          --set serviceAccount.name=aws-load-balancer-controller \
+          --set region=${AWS::Region} \
+          --set vpcId=${Vpc} \
+          --wait
+          sleep 60
+
+          EOF
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vscode-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: vscode-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref VsCodeEc2IamRole
+  
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Version: !Ref KubernetesVersion
+      AccessConfig: 
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      BootstrapSelfManagedAddons: false
+      Logging: 
+        ClusterLogging: 
+          EnabledTypes: 
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      ResourcesVpcConfig: 
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: true
+        SubnetIds: 
+          - !Ref PublicSubneta
+          - !Ref PublicSubnetb
+          - !Ref PrivateSubneta
+          - !Ref PrivateSubnetb
+      RoleArn: !GetAtt EksClusterIamRole.Arn
+      KubernetesNetworkConfig:
+        IpFamily: ipv4
+        ServiceIpv4Cidr: 172.20.0.0/16
+  EksClusterIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  VsCodeEc2IamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      AccessPolicies: 
+        - AccessScope: 
+            Type: cluster
+          PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt VsCodeEc2IamRole.Arn
+      Type: STANDARD
+  EksOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList: 
+        - sts.amazonaws.com
+  
+  VpcCniAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: vpc-cni
+      ClusterName: !Ref EksCluster
+  KubeProxyAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: kube-proxy
+      ClusterName: !Ref EksCluster
+  CoreDnsAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: coredns
+      ClusterName: !Ref EksCluster
+
+  CoreNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: core-nodegroup
+      AmiType: AL2023_x86_64_STANDARD
+      InstanceTypes: 
+        - t3.medium #c5.large
+      CapacityType: ON_DEMAND
+      ClusterName: !Ref EksCluster
+      ForceUpdateEnabled: true
+      NodeRole: !GetAtt EksNodeIamRole.Arn
+      ScalingConfig: 
+        DesiredSize: 2
+        MaxSize: 4
+        MinSize: 2
+      Subnets: 
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetb
+  EksNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  AWSLoadBalancerControllerRole:
+    # https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Federated": "${EksOidcProvider.Arn}"
+                    },
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                        "StringEquals": {
+                            "${OidcProvider}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller",
+                            "${OidcProvider}:aud": "sts.amazonaws.com"
+                        }
+                    }
+                }
+            ]
+          }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: AWSLoadBalancerControllerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "iam:CreateServiceLinkedRole"
+                Resource: "*"
+                Condition:
+                  StringEquals: 
+                    "iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"
+              - Effect: "Allow"
+                Action: 
+                  - "ec2:*"
+                  - "elasticloadbalancing:*"
+                Resource: "*"
+              - Effect: "Allow"
+                Action: 
+                  - "cognito-idp:DescribeUserPoolClient"
+                  - "acm:ListCertificates"
+                  - "acm:DescribeCertificate"
+                  - "iam:ListServerCertificates"
+                  - "iam:GetServerCertificate"
+                  - "waf-regional:GetWebACL"
+                  - "waf-regional:GetWebACLForResource"
+                  - "waf-regional:AssociateWebACL"
+                  - "waf-regional:DisassociateWebACL"
+                  - "wafv2:GetWebACL"
+                  - "wafv2:GetWebACLForResource"
+                  - "wafv2:AssociateWebACL"
+                  - "wafv2:DisassociateWebACL"
+                  - "shield:GetSubscriptionState"
+                  - "shield:DescribeProtection"
+                  - "shield:CreateProtection"
+                  - "shield:DeleteProtection"
+                Resource: "*"
+  
+  KarpenterControllerIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Effect": "Allow",
+                      "Principal": {
+                          "Federated": "${EksOidcProvider.Arn}"
+                      },
+                      "Action": "sts:AssumeRoleWithWebIdentity",
+                      "Condition": {
+                          "StringEquals": {
+                              "${OidcProvider}:sub": "system:serviceaccount:kube-system:karpenter",
+                              "${OidcProvider}:aud": "sts.amazonaws.com"
+                          }
+                      }
+                  }
+              ]
+            }
+        - OidcProvider: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns:
+        # https://raw.githubusercontent.com/aws/karpenter-provider-aws/v1.6.0/website/content/en/preview/getting-started/getting-started-with-karpenter/cloudformation.yaml
+        - !GetAtt KarpenterControllerPolicy.PolicyArn
+  KarpenterControllerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "KarpenterControllerPolicy-${EksCluster}"
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowScopedEC2InstanceAccessActions",
+              "Effect": "Allow",
+              "Resource": [
+                "arn:${AWS::Partition}:ec2:${AWS::Region}::image/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}::snapshot/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:security-group/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:subnet/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:capacity-reservation/*"
+              ],
+              "Action": [
+                "ec2:RunInstances",
+                "ec2:CreateFleet"
+              ]
+            },
+            {
+              "Sid": "AllowScopedEC2LaunchTemplateAccessActions",
+              "Effect": "Allow",
+              "Resource": "arn:${AWS::Partition}:ec2:${AWS::Region}:*:launch-template/*",
+              "Action": [
+                "ec2:RunInstances",
+                "ec2:CreateFleet"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:ResourceTag/kubernetes.io/cluster/${EksCluster}": "owned"
+                },
+                "StringLike": {
+                  "aws:ResourceTag/karpenter.sh/nodepool": "*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowScopedEC2InstanceActionsWithTags",
+              "Effect": "Allow",
+              "Resource": [
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:fleet/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:instance/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:volume/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:network-interface/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:launch-template/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:spot-instances-request/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:capacity-reservation/*"
+              ],
+              "Action": [
+                "ec2:RunInstances",
+                "ec2:CreateFleet",
+                "ec2:CreateLaunchTemplate"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestTag/kubernetes.io/cluster/${EksCluster}": "owned",
+                  "aws:RequestTag/eks:eks-cluster-name": "${EksCluster}"
+                },
+                "StringLike": {
+                  "aws:RequestTag/karpenter.sh/nodepool": "*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowScopedResourceCreationTagging",
+              "Effect": "Allow",
+              "Resource": [
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:fleet/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:instance/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:volume/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:network-interface/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:launch-template/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:spot-instances-request/*"
+              ],
+              "Action": "ec2:CreateTags",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestTag/kubernetes.io/cluster/${EksCluster}": "owned",
+                  "aws:RequestTag/eks:eks-cluster-name": "${EksCluster}",
+                  "ec2:CreateAction": [
+                    "RunInstances",
+                    "CreateFleet",
+                    "CreateLaunchTemplate"
+                  ]
+                },
+                "StringLike": {
+                  "aws:RequestTag/karpenter.sh/nodepool": "*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowScopedResourceTagging",
+              "Effect": "Allow",
+              "Resource": "arn:${AWS::Partition}:ec2:${AWS::Region}:*:instance/*",
+              "Action": "ec2:CreateTags",
+              "Condition": {
+                "StringEquals": {
+                  "aws:ResourceTag/kubernetes.io/cluster/${EksCluster}": "owned"
+                },
+                "StringLike": {
+                  "aws:ResourceTag/karpenter.sh/nodepool": "*"
+                },
+                "StringEqualsIfExists": {
+                  "aws:RequestTag/eks:eks-cluster-name": "${EksCluster}"
+                },
+                "ForAllValues:StringEquals": {
+                  "aws:TagKeys": [
+                    "eks:eks-cluster-name",
+                    "karpenter.sh/nodeclaim",
+                    "Name"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "AllowScopedDeletion",
+              "Effect": "Allow",
+              "Resource": [
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:instance/*",
+                "arn:${AWS::Partition}:ec2:${AWS::Region}:*:launch-template/*"
+              ],
+              "Action": [
+                "ec2:TerminateInstances",
+                "ec2:DeleteLaunchTemplate"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:ResourceTag/kubernetes.io/cluster/${EksCluster}": "owned"
+                },
+                "StringLike": {
+                  "aws:ResourceTag/karpenter.sh/nodepool": "*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowRegionalReadActions",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Action": [
+                "ec2:DescribeCapacityReservations",
+                "ec2:DescribeImages",
+                "ec2:DescribeInstances",
+                "ec2:DescribeInstanceTypeOfferings",
+                "ec2:DescribeInstanceTypes",
+                "ec2:DescribeLaunchTemplates",
+                "ec2:DescribeSecurityGroups",
+                "ec2:DescribeSpotPriceHistory",
+                "ec2:DescribeSubnets"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
+                }
+              }
+            },
+            {
+              "Sid": "AllowSSMReadActions",
+              "Effect": "Allow",
+              "Resource": "arn:${AWS::Partition}:ssm:${AWS::Region}::parameter/aws/service/*",
+              "Action": "ssm:GetParameter"
+            },
+            {
+              "Sid": "AllowPricingReadActions",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Action": "pricing:GetProducts"
+            },
+            {
+              "Sid": "AllowInterruptionQueueActions",
+              "Effect": "Allow",
+              "Resource": "${KarpenterInterruptionQueue.Arn}",
+              "Action": [
+                "sqs:DeleteMessage",
+                "sqs:GetQueueUrl",
+                "sqs:ReceiveMessage"
+              ]
+            },
+            {
+              "Sid": "AllowPassingInstanceRole",
+              "Effect": "Allow",
+              "Resource": "${KarpenterNodeIamRole.Arn}",
+              "Action": "iam:PassRole",
+              "Condition": {
+                "StringEquals": {
+                  "iam:PassedToService": [
+                    "ec2.amazonaws.com",
+                    "ec2.amazonaws.com.cn"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "AllowScopedInstanceProfileCreationActions",
+              "Effect": "Allow",
+              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Action": [
+                "iam:CreateInstanceProfile"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestTag/kubernetes.io/cluster/${EksCluster}": "owned",
+                  "aws:RequestTag/eks:eks-cluster-name": "${EksCluster}",
+                  "aws:RequestTag/topology.kubernetes.io/region": "${AWS::Region}"
+                },
+                "StringLike": {
+                  "aws:RequestTag/karpenter.k8s.aws/ec2nodeclass": "*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowScopedInstanceProfileTagActions",
+              "Effect": "Allow",
+              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Action": [
+                "iam:TagInstanceProfile"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:ResourceTag/kubernetes.io/cluster/${EksCluster}": "owned",
+                  "aws:ResourceTag/topology.kubernetes.io/region": "${AWS::Region}",
+                  "aws:RequestTag/kubernetes.io/cluster/${EksCluster}": "owned",
+                  "aws:RequestTag/eks:eks-cluster-name": "${EksCluster}",
+                  "aws:RequestTag/topology.kubernetes.io/region": "${AWS::Region}"
+                },
+                "StringLike": {
+                  "aws:ResourceTag/karpenter.k8s.aws/ec2nodeclass": "*",
+                  "aws:RequestTag/karpenter.k8s.aws/ec2nodeclass": "*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowScopedInstanceProfileActions",
+              "Effect": "Allow",
+              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Action": [
+                "iam:AddRoleToInstanceProfile",
+                "iam:RemoveRoleFromInstanceProfile",
+                "iam:DeleteInstanceProfile"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:ResourceTag/kubernetes.io/cluster/${EksCluster}": "owned",
+                  "aws:ResourceTag/topology.kubernetes.io/region": "${AWS::Region}"
+                },
+                "StringLike": {
+                  "aws:ResourceTag/karpenter.k8s.aws/ec2nodeclass": "*"
+                }
+              }
+            },
+            {
+              "Sid": "AllowInstanceProfileReadActions",
+              "Effect": "Allow",
+              "Resource": "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*",
+              "Action": "iam:GetInstanceProfile"
+            },
+            {
+              "Sid": "AllowAPIServerEndpointDiscovery",
+              "Effect": "Allow",
+              "Resource": "arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EksCluster}",
+              "Action": "eks:DescribeCluster"
+            }
+          ]
+        }
+  KarpenterInterruptionQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Delete
+    Properties:
+      QueueName: !Sub "${EksCluster}"
+      MessageRetentionPeriod: 300
+      SqsManagedSseEnabled: true
+  KarpenterInterruptionQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref KarpenterInterruptionQueue
+      PolicyDocument:
+        Id: EC2InterruptionPolicy
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+                - sqs.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt KarpenterInterruptionQueue.Arn
+          - Sid: DenyHTTP
+            Effect: Deny
+            Action: sqs:*
+            Resource: !GetAtt KarpenterInterruptionQueue.Arn
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+            Principal: "*"
+  ScheduledChangeRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.health
+        detail-type:
+          - AWS Health Event
+      Targets:
+        - Id: KarpenterInterruptionQueueTarget
+          Arn: !GetAtt KarpenterInterruptionQueue.Arn
+  SpotInterruptionRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Spot Instance Interruption Warning
+      Targets:
+        - Id: KarpenterInterruptionQueueTarget
+          Arn: !GetAtt KarpenterInterruptionQueue.Arn
+  RebalanceRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance Rebalance Recommendation
+      Targets:
+        - Id: KarpenterInterruptionQueueTarget
+          Arn: !GetAtt KarpenterInterruptionQueue.Arn
+  InstanceStateChangeRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+      Targets:
+        - Id: KarpenterInterruptionQueueTarget
+          Arn: !GetAtt KarpenterInterruptionQueue.Arn
+  KarpenterNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  KarpenterNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref KarpenterNodeIamRole ]
+  KarpenterNodeIamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt KarpenterNodeIamRole.Arn
+      Type: EC2_LINUX
+
+  SsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - VsCodeEc2 # Required
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 600
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref VsCodeEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              su - ec2-user << 'SSMEOF'
+              export HOME=/home/ec2-user && cd $HOME
+              aws configure set region ${AWS::Region}
+
+              echo $'#!/bin/bash
+              helm upgrade --install aws-node-termination-handler oci://public.ecr.aws/aws-ec2/helm/aws-node-termination-handler -n kube-system \
+              --set enableSpotInterruptionDraining="true" \
+              --set enableRebalanceMonitoring="true" \
+              --set enableRebalanceDraining="true" \
+              --set enableScheduledEventDraining="true" \
+              --wait' > install_nth.sh
+              chmod +x install_nth.sh
+              ./install_nth.sh
+              
+              echo $'#!/bin/bash
+              aws iam create-service-linked-role --aws-service-name spot.amazonaws.com || true
+              export KARPENTER_NAMESPACE="kube-system"
+              export KARPENTER_VERSION="1.7.0"
+              export K8S_VERSION="1.33"
+              export AWS_PARTITION="aws"
+              export CLUSTER_NAME="${EksCluster}"
+              export AWS_DEFAULT_REGION="${AWS::Region}"
+              export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+              export TEMPOUT="$(mktemp)"
+              helm registry logout public.ecr.aws
+              helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
+              --version "$KARPENTER_VERSION" \
+              --namespace "$KARPENTER_NAMESPACE" --create-namespace \
+              --set "settings.clusterName=$CLUSTER_NAME" \
+              --set "settings.interruptionQueue=${KarpenterInterruptionQueue.QueueName}" \
+              --set controller.resources.requests.cpu=1 \
+              --set controller.resources.requests.memory=1Gi \
+              --set controller.resources.limits.cpu=1 \
+              --set controller.resources.limits.memory=1Gi \
+              --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${KarpenterControllerIamRole.Arn}" \
+              --wait' > install_karpenter.sh
+              chmod +x install_karpenter.sh
+              ./install_karpenter.sh
+
+              mkdir -p /home/ec2-user/manifests
+              echo 'apiVersion: karpenter.sh/v1
+              kind: NodePool
+              metadata:
+                name: spot
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      nodegroup: spot
+                      type: karpenter
+                  spec:
+                    nodeClassRef:
+                      group: karpenter.k8s.aws
+                      kind: EC2NodeClass
+                      name: spot
+                    requirements:
+                      - key: karpenter.k8s.aws/instance-family
+                        operator: In
+                        values:
+                        - m5
+                      - key: karpenter.k8s.aws/instance-size
+                        operator: In
+                        values:
+                          - xlarge
+                          - 2xlarge
+                          - 4xlarge
+                          - 8xlarge
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values:
+                          - amd64
+                      - key: karpenter.sh/capacity-type
+                        operator: In
+                        values:
+                          - spot
+                disruption:
+                  budgets:
+                  - nodes: 10%
+                  consolidateAfter: 30s
+                  consolidationPolicy: WhenEmpty
+                limits:
+                  cpu: 1000
+                  memory: 1000Gi
+              ---
+              apiVersion: karpenter.k8s.aws/v1
+              kind: EC2NodeClass
+              metadata:
+                name: spot
+              spec:
+                amiFamily: AL2023
+                amiSelectorTerms:
+                - alias: al2023@latest
+                blockDeviceMappings:
+                - deviceName: /dev/xvda
+                  ebs:
+                    encrypted: true
+                    volumeSize: 100Gi
+                    volumeType: gp3
+                - deviceName: /dev/xvdb
+                  ebs:
+                    encrypted: true
+                    volumeSize: 300Gi
+                    volumeType: gp3
+                detailedMonitoring: true
+                metadataOptions:
+                  httpEndpoint: enabled
+                  httpProtocolIPv6: disabled
+                  httpPutResponseHopLimit: 2
+                  httpTokens: required
+                subnetSelectorTerms:
+                  - id: ${PrivateSubneta}
+                  - id: ${PrivateSubnetb}
+                securityGroupSelectorTerms:
+                  - id: ${EksCluster.ClusterSecurityGroupId}
+                instanceProfile: ${KarpenterNodeInstanceProfile}
+                tags:
+                  Name: spot' > /home/ec2-user/manifests/spot_nodepool.yaml
+              kubectl apply -f /home/ec2-user/manifests/spot_nodepool.yaml
+
+              echo 'apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                labels:
+                  app: nginx
+                name: nginx
+              spec:
+                replicas: 6
+                selector:
+                  matchLabels:
+                    app: nginx
+                template:
+                  metadata:
+                    creationTimestamp: null
+                    labels:
+                      app: nginx
+                  spec:
+                    nodeSelector:
+                      nodegroup: spot
+                      type: karpenter
+                    containers:
+                    - image: nginx
+                      name: nginx' > /home/ec2-user/manifests/spot_deployment.yaml
+              kubectl apply -f /home/ec2-user/manifests/spot_deployment.yaml
+
+              wget -O eks-node-viewer https://github.com/awslabs/eks-node-viewer/releases/download/v0.7.4/eks-node-viewer_Linux_x86_64
+              chmod +x eks-node-viewer
+              sudo mv -v eks-node-viewer /usr/local/bin
+
+              SSMEOF
+
+  SpotInstanceInterruptionExperimentTemplate:
+    Type: AWS::FIS::ExperimentTemplate
+    Properties:
+      Description: Spot Instance Interruption
+      Actions: 
+        SpotInstanceInterruption:
+          ActionId: aws:ec2:send-spot-instance-interruptions 
+          Parameters: 
+            durationBeforeInterruption: PT900S
+          Targets:
+            SpotInstances: RandomSpotInstance
+      Targets: 
+        RandomSpotInstance:
+          ResourceTags:
+            Name: spot
+          ResourceType: aws:ec2:spot-instance
+          SelectionMode: COUNT(1)
+      ExperimentOptions: 
+        AccountTargeting: single-account
+        EmptyTargetResolutionMode: fail
+      StopConditions:
+        - Source: none
+      RoleArn: !GetAtt FisIamRole.Arn
+  FisIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aws-fis-itn
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - fis.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSFaultInjectionSimulatorEC2Access
+      Policies:
+        - PolicyName: aws-fis-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - fis:*
+                Resource: "*"
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${VsCodeEc2.PublicIp}:8000
+    Description: Public IP Address of the VS Code
+  ExperimentTemplates:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/fis/home#ExperimentTemplates
+    Description: FIS Experiment Templates
