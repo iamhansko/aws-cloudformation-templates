@@ -363,9 +363,9 @@ Resources:
       ForceUpdateEnabled: true
       NodeRole: !GetAtt EksNodeIamRole.Arn
       ScalingConfig: 
-        DesiredSize: 2
-        MaxSize: 10
-        MinSize: 2
+        DesiredSize: 4
+        MaxSize: 12
+        MinSize: 4
       Subnets: 
         - !Ref PrivateSubneta
         - !Ref PrivateSubnetb
@@ -387,40 +387,6 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
-  # Nlb:
-  #   Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-  #   Properties:
-  #     Name: grafana
-  #     Type: network
-  #     Scheme: internet-facing
-  #     SecurityGroups:
-  #       - !GetAtt Vpc.DefaultSecurityGroup # Ignored
-  #     Subnets: 
-  #       - !Ref PublicSubneta
-  #       - !Ref PublicSubnetb
-  #     Tags: 
-  #       - Key: elbv2.k8s.aws/cluster
-  #         Value: !Ref EksCluster
-  #       - Key: service.k8s.aws/resource
-  #         Value: LoadBalancer
-  #       - Key: service.k8s.aws/stack
-  #         Value: kube-system/ingress-nginx-controller
-  # NlbSecurityGroup:
-  #   Type: AWS::EC2::SecurityGroup
-  #   Properties:
-  #     GroupDescription: Security Group
-  #     GroupName: nlb-sg
-  #     SecurityGroupIngress:
-  #       - !If [SecurityGroupInboundFromAnywhere, {
-  #           "IpProtocol": "tcp",
-  #           "FromPort": 80,
-  #           "ToPort": 80,
-  #           "CidrIp": "0.0.0.0/0"
-  #         }, !Ref AWS::NoValue]
-  #     VpcId: !Ref Vpc
-  #     Tags:
-  #       - Key: Name
-  #         Value: nlb-sg
   AWSLoadBalancerControllerRole:
     # https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
     Type: AWS::IAM::Role
