@@ -213,7 +213,6 @@ Resources:
           echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
           echo "source <(kubectl completion bash)" >> ~/.bashrc
           exec bash
-          aws eks update-kubeconfig --region ${AWS::Region} --name ${PrimaryCluster}
 
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
           sudo mv /tmp/eksctl /usr/local/bin
@@ -221,15 +220,7 @@ Resources:
           curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
           chmod 700 /home/ec2-user/get_helm.sh
           /home/ec2-user/get_helm.sh
-
-          helm repo add eks https://aws.github.io/eks-charts
-          helm repo update eks
-          helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
-          --set clusterName=${PrimaryCluster} \
-          --set serviceAccount.name=aws-load-balancer-controller \
-          --set region=${AWS::Region} \
-          --set vpcId=${Vpc}
-          sleep 60
+          rm /home/ec2-user/get_helm.sh
 
           mkdir -p /home/ec2-user/manifests
           echo 'apiVersion: storage.k8s.io/v1
@@ -242,8 +233,7 @@ Resources:
             type: gp3
           provisioner: ebs.csi.aws.com
           reclaimPolicy: Delete
-          volumeBindingMode: WaitForFirstConsumer' > manifests/ebs.yaml
-          kubectl apply -f manifests/ebs.yaml
+          volumeBindingMode: WaitForFirstConsumer' > manifests/storageclass.yaml
           echo 'apiVersion: v1
           kind: Service
           metadata:
@@ -291,7 +281,43 @@ Resources:
                 resources:
                   requests:
                     storage: 1Gi' > manifests/statefulset.yaml
+          echo 'apiVersion: snapshot.storage.k8s.io/v1
+          kind: VolumeSnapshotClass
+          metadata:
+            name: ebs-vsc
+            annotations:
+              snapshot.storage.kubernetes.io/is-default-class: "true"
+          driver: ebs.csi.aws.com
+          deletionPolicy: Delete' > manifests/volumesnapshotclass.yaml
+
+          aws eks update-kubeconfig --region ${AWS::Region} --name ${PrimaryCluster} --alias primary
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update eks
+          helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
+          --set clusterName=${PrimaryCluster} \
+          --set serviceAccount.name=aws-load-balancer-controller \
+          --set region=${AWS::Region} \
+          --set vpcId=${Vpc}
+          sleep 60
+          kubectl apply -f manifests/storageclass.yaml
+          kubectl kustomize https://github.com/kubernetes-csi/external-snapshotter/client/config/crd | kubectl create -f -
+          kubectl -n kube-system kustomize https://github.com/kubernetes-csi/external-snapshotter/deploy/kubernetes/snapshot-controller | kubectl create -f -
+          kubectl apply -f manifests/volumesnapshotclass.yaml
           kubectl apply -f manifests/statefulset.yaml
+
+          aws eks update-kubeconfig --region ${AWS::Region} --name ${SecondaryCluster} --alias secondary
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update eks
+          helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
+          --set clusterName=${PrimaryCluster} \
+          --set serviceAccount.name=aws-load-balancer-controller \
+          --set region=${AWS::Region} \
+          --set vpcId=${Vpc}
+          sleep 60
+          kubectl apply -f manifests/storageclass.yaml
+          kubectl kustomize https://github.com/kubernetes-csi/external-snapshotter/client/config/crd | kubectl create -f -
+          kubectl -n kube-system kustomize https://github.com/kubernetes-csi/external-snapshotter/deploy/kubernetes/snapshot-controller | kubectl create -f -
+          kubectl apply -f manifests/volumesnapshotclass.yaml
 
           wget -q https://github.com/vmware-tanzu/velero/releases/download/v1.17.0/velero-v1.17.0-linux-amd64.tar.gz
           tar -xvf velero-v1.17.0-linux-amd64.tar.gz
@@ -300,18 +326,26 @@ Resources:
           rm /home/ec2-user/velero-v1.17.0-linux-amd64.tar.gz
           rm -r /home/ec2-user/velero-v1.17.0-linux-amd64
 
-          git clone https://github.com/aws-samples/amazon-eks-crossregion-dr-velero.git
           echo '#!/bin/bash
-          cd /home/ec2-user/amazon-eks-crossregion-dr-velero
-          helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
-          helm repo update vmware-tanzu
-          helm upgrade --install velero vmware-tanzu/velero -n velero --create-namespace -f config_files/values-source.yaml --version 5.2.2 --wait
-          velero create backup jhbackup --snapshot-move-data --include-namespaces default
           # Enabling cross region replication on the source region S3 bucket (optional)
           # https://aws.amazon.com/blogs/aws/new-replicate-existing-objects-with-amazon-s3-batch-replication/
+          velero install --wait \
+          --provider aws \
+          --plugins velero/velero-plugin-for-aws:v1.13.0 \
+          --bucket ${S3Bucket} \
+          --backup-location-config region=${AWS::Region} \
+          --snapshot-location-config region=${AWS::Region} \
+          --features EnableCSI \
+          --use-node-agent \
+          --no-secret
+          # velero create backup web --snapshot-move-data --include-namespaces default
+          # velero create restore --from-backup web
           ' > /home/ec2-user/velero.sh
           chmod +x /home/ec2-user/velero.sh
-          # /home/ec2-user/velero.sh
+          aws eks update-kubeconfig --region ${AWS::Region} --name ${PrimaryCluster} --alias primary
+          /home/ec2-user/velero.sh
+          aws eks update-kubeconfig --region ${AWS::Region} --name ${SecondaryCluster} --alias secondary
+          /home/ec2-user/velero.sh
           EOF
 
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
@@ -615,7 +649,13 @@ Resources:
             Ref: !Sub ${Prefix}Cluster
           Namespace: velero
           RoleArn: !GetAtt VeleroSourceRole.Arn
-          ServiceAccount: velero-server
+          ServiceAccount: velero
+  
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
 
   # SsmAssociation:
   #   Type: AWS::SSM::Association
