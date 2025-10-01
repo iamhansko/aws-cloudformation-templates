@@ -327,8 +327,6 @@ Resources:
           rm -r /home/ec2-user/velero-v1.17.0-linux-amd64
 
           echo '#!/bin/bash
-          # Enabling cross region replication on the source region S3 bucket (optional)
-          # https://aws.amazon.com/blogs/aws/new-replicate-existing-objects-with-amazon-s3-batch-replication/
           velero install --wait \
           --provider aws \
           --plugins velero/velero-plugin-for-aws:v1.13.0 \
@@ -338,13 +336,15 @@ Resources:
           --features EnableCSI \
           --use-node-agent \
           --no-secret
-          # velero create backup web --snapshot-move-data --include-namespaces default
-          # velero create restore --from-backup web
+          # kubectl config use-context primary && velero create backup web --snapshot-move-data --include-namespaces default
+          # kubectl config use-context secondary && velero create restore --from-backup web
+          # (Optional) enabling cross region replication on the source region S3 bucket
+          # https://aws.amazon.com/blogs/aws/new-replicate-existing-objects-with-amazon-s3-batch-replication/
           ' > /home/ec2-user/velero.sh
           chmod +x /home/ec2-user/velero.sh
-          aws eks update-kubeconfig --region ${AWS::Region} --name ${PrimaryCluster} --alias primary
+          kubectl config use-context secondary
           /home/ec2-user/velero.sh
-          aws eks update-kubeconfig --region ${AWS::Region} --name ${SecondaryCluster} --alias secondary
+          kubectl config use-context primary
           /home/ec2-user/velero.sh
           EOF
 
