@@ -21,24 +21,14 @@ Mappings:
     a:
       PublicSubnetCidr: 10.0.0.0/24
       PrivateSubnetCidr: 10.0.1.0/24
-      PodSubnetCidr: 100.64.0.0/24
     b: 
       PublicSubnetCidr: 10.0.2.0/24
       PrivateSubnetCidr: 10.0.3.0/24
-      PodSubnetCidr: 100.64.1.0/24
     c: 
       PublicSubnetCidr: 10.0.4.0/24
       PrivateSubnetCidr: 10.0.5.0/24
-      PodSubnetCidr: 100.64.2.0/24
 
 Resources:
-  KeyPair:
-    Type: AWS::EC2::KeyPair
-    Properties:
-      KeyName: !Sub
-        - "key-${Id}"
-        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
-  
   Vpc:
     Type: AWS::EC2::VPC
     Properties:
@@ -59,19 +49,6 @@ Resources:
     Properties:
       InternetGatewayId: !Ref InternetGateway
       VpcId: !Ref Vpc
-  PublicSubnetRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      Tags:
-        - Key: Name
-          Value: public-rt
-      VpcId: !Ref Vpc
-  PublicSubnetRoute:
-    Type: AWS::EC2::Route
-    Properties:
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
-      RouteTableId: !Ref PublicSubnetRouteTable
 
   # PublicSubnets
   Fn::ForEach::PublicSubnets:
@@ -93,6 +70,19 @@ Resources:
           RouteTableId: !Ref PublicSubnetRouteTable
           SubnetId:
             Ref: !Sub PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
   
   # PrivateSubnets
   Fn::ForEach::PrivateSubnets:
@@ -142,9 +132,18 @@ Resources:
             Ref: !Sub NatGateway${Az}
           RouteTableId:
             Ref: !Sub PrivateSubnet${Az}RouteTable
+  
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
 
   VsCodeEc2:
     Type: AWS::EC2::Instance
+    DependsOn:
+      - CoreNodeGroup
     CreationPolicy:
       ResourceSignal:
         Count: '1'                
@@ -221,8 +220,17 @@ Resources:
           chmod 700 /home/ec2-user/get_helm.sh
           /home/ec2-user/get_helm.sh
 
-          kubectl set env daemonset aws-node -n kube-system ENABLE_PREFIX_DELEGATION=true
-          kubectl set env daemonset aws-node -n kube-system WARM_PREFIX_TARGET=1
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update eks
+          helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
+          --set clusterName=${EksCluster} \
+          --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${AWSLoadBalancerControllerRole.Arn}" \
+          --set serviceAccount.name=aws-load-balancer-controller \
+          --set region=${AWS::Region} \
+          --set vpcId=${Vpc} \
+          --wait
+          sleep 60
+
           EOF
 
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
@@ -230,7 +238,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security Group
-      GroupName: bastion-sg
+      GroupName: vscode-sg
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         !If [SecurityGroupInboundFromAnywhere, [{
@@ -241,7 +249,7 @@ Resources:
         }], []]
       Tags:
         - Key: Name
-          Value: bastion-sg
+          Value: vscode-sg
   VsCodeEc2IamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -261,7 +269,7 @@ Resources:
     Properties:
       Roles: 
         - !Ref VsCodeEc2IamRole
-
+  
   EksCluster:
     Type: AWS::EKS::Cluster
     Properties:
@@ -269,7 +277,7 @@ Resources:
       AccessConfig: 
         AuthenticationMode: API_AND_CONFIG_MAP
         BootstrapClusterCreatorAdminPermissions: true
-      BootstrapSelfManagedAddons: true
+      BootstrapSelfManagedAddons: false
       Logging: 
         ClusterLogging: 
           EnabledTypes: 
@@ -280,7 +288,7 @@ Resources:
             - Type: scheduler
       ResourcesVpcConfig: 
         EndpointPrivateAccess: true
-        EndpointPublicAccess: false
+        EndpointPublicAccess: true
         SubnetIds: 
           - !Ref PublicSubneta
           - !Ref PublicSubnetb
@@ -320,11 +328,25 @@ Resources:
       Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
       ClientIdList: 
         - sts.amazonaws.com
+  
+  VpcCniAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: vpc-cni
+      ClusterName: !Ref EksCluster
+  KubeProxyAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: kube-proxy
+      ClusterName: !Ref EksCluster
+  CoreDnsAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: coredns
+      ClusterName: !Ref EksCluster
 
   CoreNodeGroup:
     Type: AWS::EKS::Nodegroup
-    DependsOn:
-      - VsCodeEc2
     Properties:
       NodegroupName: core-nodegroup
       AmiType: AL2023_x86_64_STANDARD
@@ -335,19 +357,17 @@ Resources:
       ForceUpdateEnabled: true
       NodeRole: !GetAtt EksNodeIamRole.Arn
       ScalingConfig: 
-        DesiredSize: 1
-        MaxSize: 1
-        MinSize: 1
+        DesiredSize: 2
+        MaxSize: 4
+        MinSize: 2
       Subnets: 
         - !Ref PrivateSubneta
         - !Ref PrivateSubnetb
       LaunchTemplate:
         Id: !Ref CoreLaunchTemplate
-        Version: !GetAtt CoreLaunchTemplate.LatestVersionNumber
   CoreLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
-      LaunchTemplateName: core-node-lt
       LaunchTemplateData: 
         KeyName: !Ref KeyPair
         SecurityGroupIds: 
@@ -356,37 +376,31 @@ Resources:
           - ResourceType: instance
             Tags: 
               - Key: Name
-                Value: core-node
+                Value: core
+        BlockDeviceMappings:
+          - DeviceName: /dev/sdz
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: 80
+              DeleteOnTermination: true
+              Encrypted: false
         UserData:
           Fn::Base64: !Sub |
             MIME-Version: 1.0
             Content-Type: multipart/mixed; boundary="==BOUNDARY=="
-            
-            # # Optional
-            # --==BOUNDARY==
-            # Content-Type: application/node.eks.aws
-            
-            # ---
-            # apiVersion: node.eks.aws/v1alpha1
-            # kind: NodeConfig
-            # spec:
-            #   cluster:
-            #     apiServerEndpoint: ${EksCluster.Endpoint}
-            #     certificateAuthority: ${EksCluster.CertificateAuthorityData}
-            #     cidr: 172.20.0.0/16
-            #     name: ${EksCluster}
-            #   kubelet:
-            #     config:
-            #       maxPods: 110
-            #       clusterDNS:
-            #       - 172.20.0.10
-            
+
             --==BOUNDARY==
             Content-Type: text/x-shellscript; charset="us-ascii"
             
             #!/bin/bash
-            yum update -y
+            dnf update -yq
             timedatectl set-timezone Asia/Seoul
+            systemctl stop containerd
+            mkfs -t ext4 /dev/nvme1n1
+            rm -rf /var/lib/containerd/*
+            mount /dev/nvme1n1 /var/lib/containerd/
+            systemctl start containerd
+            ctr --namespace k8s.io image import --base-name localhost/kubernetes/pause:latest /etc/eks/pause.tar
             
             --==BOUNDARY==--
   EksNodeIamRole:
@@ -406,40 +420,7 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-  
-  Alb:
-    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties:
-      Type: application
-      Scheme: internet-facing
-      SecurityGroups:
-        - !GetAtt Vpc.DefaultSecurityGroup # Ignored
-      Subnets: 
-        - !Ref PublicSubneta
-        - !Ref PublicSubnetb
-      Tags: 
-        - Key: elbv2.k8s.aws/cluster
-          Value: !Ref EksCluster
-        - Key: ingress.k8s.aws/resource
-          Value: LoadBalancer
-        - Key: ingress.k8s.aws/stack
-          Value: default/nginx
-  AlbSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Security Group
-      GroupName: alb-sg
-      SecurityGroupIngress:
-        - !If [SecurityGroupInboundFromAnywhere, {
-            "IpProtocol": "tcp",
-            "FromPort": 80,
-            "ToPort": 80,
-            "CidrIp": "0.0.0.0/0"
-          }, !Ref AWS::NoValue]
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: alb-sg
+
   AWSLoadBalancerControllerRole:
     # https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
     Type: AWS::IAM::Role
@@ -503,101 +484,7 @@ Resources:
                   - "shield:DeleteProtection"
                 Resource: "*"
 
-  SsmAssociation:
-    Type: AWS::SSM::Association
-    DependsOn:
-      - VsCodeEc2 # Required
-      - CoreNodeGroup
-      - Alb
-    Properties:
-      Name: AWS-RunShellScript
-      WaitForSuccessTimeoutSeconds: 600
-      Targets:
-        - Key: InstanceIds
-          Values:
-            - !Ref VsCodeEc2
-      Parameters:
-        commands: 
-          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
-          - !Sub |
-              su - ec2-user << 'SSMEOF'
-              export HOME=/home/ec2-user && cd $HOME
-
-              helm repo add eks https://aws.github.io/eks-charts
-              helm repo update eks
-              helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
-              --set clusterName=${EksCluster} \
-              --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${AWSLoadBalancerControllerRole.Arn}" \
-              --set serviceAccount.name=aws-load-balancer-controller \
-              --set region=${AWS::Region} \
-              --set vpcId=${Vpc} \
-              --wait
-              sleep 120
-
-              mkdir -p manifests
-              cat > manifests/system.yaml << 'EOF'
-              apiVersion: apps/v1
-              kind: Deployment
-              metadata:
-                name: nginx
-              spec:
-                selector:
-                  matchLabels:
-                    app.kubernetes.io/name: nginx
-                replicas: 100
-                template:
-                  metadata:
-                    labels:
-                      app.kubernetes.io/name: nginx
-                  spec:
-                    containers:
-                    - image: nginxdemos/hello
-                      imagePullPolicy: Always
-                      name: nginx
-                      ports:
-                      - containerPort: 80
-              ---
-              apiVersion: v1
-              kind: Service
-              metadata:
-                name: nginx
-              spec:
-                ports:
-                  - port: 80
-                    targetPort: 80
-                    protocol: TCP
-                selector:
-                  app.kubernetes.io/name: nginx
-              ---
-              apiVersion: networking.k8s.io/v1
-              kind: Ingress
-              metadata:
-                name: nginx
-                annotations:
-                  alb.ingress.kubernetes.io/scheme: internet-facing
-                  alb.ingress.kubernetes.io/target-type: ip
-                  alb.ingress.kubernetes.io/security-groups: ${AlbSecurityGroup}
-                  alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
-              spec:
-                ingressClassName: alb
-                rules:
-                  - http:
-                      paths:
-                      - path: /
-                        pathType: Prefix
-                        backend:
-                          service:
-                            name: nginx
-                            port:
-                              number: 80
-              EOF
-              kubectl apply -f manifests/system.yaml || true
-              SSMEOF
-
 Outputs:
   VsCode:
     Value: !Sub http://${VsCodeEc2.PublicIp}:8000
     Description: Public IP Address of the VS Code
-  IngressDnsName:
-    Value: !Sub http://${Alb.DNSName}
-    Description: Kubernetes Ingress DNS Name
