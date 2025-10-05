@@ -699,7 +699,7 @@ Resources:
       HttpMethod: GET
       Integration:
         Type: AWS
-        IntegrationHttpMethod: GET
+        IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GameRankReader.Arn}/invocations
         IntegrationResponses:
           - StatusCode: 200
