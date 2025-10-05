@@ -203,8 +203,10 @@ Resources:
           ROLE_ARN = ${GomokuGameLiftFleetRole.Arn}' > ./gomoku/bin/FlexMatch/GomokuServer/Binaries/Win64/config.ini
           cd ./gomoku/bin/FlexMatch/GomokuServer
           zip -r server.zip ./*
+          mv server.zip /home/ec2-user/
 
           aws s3 cp --recursive /home/ec2-user/gomoku/ s3://${GameSourceS3Bucket}
+          aws s3 cp /home/ec2-user/server.zip s3://${GameSourceS3Bucket}
           EOF
 
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
@@ -265,6 +267,18 @@ Resources:
               sed -i 's/niop6gw2v0/${GomokuAPI}/g' ./gomoku/web/main.js
               sed -i 's/us-east-1/${AWS::Region}/g' ./gomoku/web/main.js
               aws s3 cp --recursive ./gomoku/web/ s3://${WebS3Bucket}
+
+              cd ./gomoku/bin/FlexMatch
+              echo '[config]
+              MATCH_SERVER_API = https://${GomokuAPI}.execute-api.${AWS::Region}.amazonaws.com/prod
+              PLAYER_NAME = Amazonian
+              PLAYER_PASSWD = simplepw00' > Client_player1/config.ini
+              echo '[config]
+              MATCH_SERVER_API = https://${GomokuAPI}.execute-api.${AWS::Region}.amazonaws.com/prod
+              PLAYER_NAME = Ahro
+              PLAYER_PASSWD = simplepw00' > Client_player2/config.ini
+              zip -r /home/ec2-user/client.zip Client_player1/ Client_player2/
+              aws s3 cp /home/ec2-user/client.zip s3://${GameSourceS3Bucket}
               SSMEOF
   
   GameSourceS3Bucket:
@@ -660,7 +674,7 @@ Resources:
               - SNS:Subscribe
               - SNS:ListSubscriptionsByTopic
               - SNS:Publish
-            Resource: !Sub arn:aws:sns:{AWS::Region}:{AWS::AccountId}:{SnsTopic.TopicName}
+            Resource: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SnsTopic.TopicName}
             Condition:
               StringEquals:
                 AWS:SourceOwner: !Ref AWS::AccountId
@@ -669,7 +683,7 @@ Resources:
             Principal:
               Service: gamelift.amazonaws.com
             Action: SNS:Publish
-            Resource: !Sub arn:aws:sns:{AWS::Region}:{AWS::AccountId}:{SnsTopic.TopicName}
+            Resource: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SnsTopic.TopicName}
       Topics: 
         - !Ref SnsTopic
   SnsSubscription:
@@ -897,7 +911,7 @@ Resources:
       OperatingSystem: WINDOWS_2016
       StorageLocation:
         Bucket: !Ref GameSourceS3Bucket
-        Key: bin/FlexMatch/GomokuServer/server.zip    
+        Key: server.zip    
         RoleArn: !GetAtt GameLiftBuildRole.Arn
   GameLiftFleet:
     Type: AWS::GameLift::Fleet
@@ -1020,6 +1034,8 @@ Outputs:
   VsCode:
     Value: !Sub http://${VsCodeEc2.PublicIp}:8000
     Description: Public IP Address of the VS Code
-  GomokuAPI:
-    Value: !Sub https://${GomokuAPI}.execute-api.${AWS::Region}.amazonaws.com/prod
-    Description: Gomoku API URL
+  GomokuWeb:
+    Value: !GetAtt WebS3Bucket.WebsiteURL
+    Description: Gomoku Leaderboard URL
+  ClientZipFileDownload:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/s3/object/${GameSourceS3Bucket}?region=${AWS::Region}&bucketType=general&prefix=client.zip
