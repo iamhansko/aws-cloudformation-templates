@@ -1,0 +1,31 @@
+Parameters:
+  SourceAccountId:
+    Type: String
+    AllowedPattern: ".+"
+    ConstraintDescription: Parameter [SourceAccountId] is empty
+Resources:
+  DestinationS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+  DestinationS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DestinationS3Bucket
+      PolicyDocument:
+        Statement:
+          - Principal:
+              AWS: !Sub arn:aws:iam::${SourceAccountId}:root
+            Effect: Allow
+            Action:
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning
+              - s3:ReplicateObject
+              - s3:ReplicateDelete
+            Resource:
+              - !Sub arn:aws:s3:::${DestinationS3Bucket}
+              - !Sub arn:aws:s3:::${DestinationS3Bucket}/*
+Outputs:
+  DestinationS3Bucket:
+    Value: !Ref DestinationS3Bucket

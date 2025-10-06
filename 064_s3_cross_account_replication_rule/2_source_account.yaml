@@ -1,0 +1,99 @@
+Parameters:
+  DestinationS3BucketName:
+    Type: String
+    AllowedPattern: ".+"
+    ConstraintDescription: Parameter [DestinationS3BucketName] is empty
+  DestinationAccountId:
+    Type: String
+    AllowedPattern: ".+"
+    ConstraintDescription: Parameter [DestinationAccountId] is empty
+  # SourceS3BucketName:
+  #   Type: String
+  #   AllowedPattern: ".+"
+  #   ConstraintDescription: Parameter [SourceS3BucketName] is empty
+Resources:
+  SourceS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # BucketName: !Ref SourceS3BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      ReplicationConfiguration:
+        Role: !GetAtt S3ReplicationIamRole.Arn
+        Rules: 
+          - Destination: 
+              Account: !Ref DestinationAccountId
+              Bucket: !Sub arn:aws:s3:::${DestinationS3BucketName}
+              Metrics: 
+                Status: Enabled
+                EventThreshold:
+                  Minutes: 15
+              ReplicationTime: 
+                Status: Enabled
+                Time:
+                  Minutes: 15
+            Filter:
+              Prefix: ""
+            Priority: 0
+            DeleteMarkerReplication: 
+              Status: Enabled
+            Status: Enabled
+  S3ReplicationIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3ReplicationIamPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetReplicationConfiguration
+                  - s3:GetObjectVersionForReplication
+                  - s3:GetObjectVersionAcl
+                  - s3:GetObjectVersionTagging
+                  - s3:GetObjectRetention
+                  - s3:GetObjectLegalHold
+                  - s3:ReplicateObject
+                  - s3:ReplicateDelete
+                  - s3:ReplicateTags
+                  - s3:ObjectOwnerOverrideToBucketOwner
+                Resource: "*"
+        # - PolicyName: MinimumPolicy
+        #   PolicyDocument:
+        #     Version: 2012-10-17
+        #     Statement:
+        #       - Effect: Allow
+        #         Action:
+        #           - s3:ListBucket
+        #           - s3:GetReplicationConfiguration
+        #           - s3:GetObjectVersionForReplication
+        #           - s3:GetObjectVersionAcl
+        #           - s3:GetObjectVersionTagging
+        #           - s3:GetObjectRetention
+        #           - s3:GetObjectLegalHold
+        #         Resource:
+        #           - !Sub arn:aws:s3:::${SourceS3BucketName}
+        #           - !Sub arn:aws:s3:::${SourceS3BucketName}/*
+        #           - !Sub arn:aws:s3:::${DestinationS3BucketName}
+        #           - !Sub arn:aws:s3:::${DestinationS3BucketName}/*
+        #       - Effect: Allow
+        #         Action:
+        #           - s3:ReplicateObject
+        #           - s3:ReplicateDelete
+        #           - s3:ReplicateTags
+        #           - s3:ObjectOwnerOverrideToBucketOwner
+        #         Resource:
+        #           - !Sub arn:aws:s3:::${SourceS3BucketName}/*
+        #           - !Sub arn:aws:s3:::${DestinationS3BucketName}/*
+Outputs:
+  SourceS3Bucket:
+    Value: !Ref SourceS3Bucket
