@@ -228,8 +228,7 @@ Resources:
           --set routingMode=native \
           --set kubeProxyReplacement=true \
           --set k8sServiceHost=$EKS_API_SERVER_HOST \
-          --set k8sServicePort=443 \
-          --wait
+          --set k8sServicePort=443
 
           CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
           CLI_ARCH=amd64
