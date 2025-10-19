@@ -479,6 +479,9 @@ Resources:
               --set vpcId=${Vpc} \
               --wait
 
+              mkdir -p /home/ec2-user/manifests
+              wget -O /home/ec2-user/manifests/2048.yaml -q https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.13.0/docs/examples/2048/2048_full.yaml
+
               EOF
 
 Outputs:
