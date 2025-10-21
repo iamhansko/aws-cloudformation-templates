@@ -258,6 +258,8 @@ Resources:
                 app: nginx' > /home/ec2-user/manifests/nginx.yaml
           kubectl apply -f /home/ec2-user/manifests/nginx.yaml
 
+          aws ec2 create-launch-template-version --launch-template-id ${CoreLaunchTemplate.LaunchTemplateId} --source-version 1 --launch-template-data '{"TagSpecifications":[{"ResourceType":"instance","Tags":[{"Key":"Name","Value":"v2"}]}]}'
+
           EOF
 
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
@@ -392,6 +394,7 @@ Resources:
         - !Ref PrivateSubnetb
       LaunchTemplate:
         Id: !Ref CoreLaunchTemplate
+        Version: 1
   CoreLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
