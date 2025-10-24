@@ -1,0 +1,1 @@
+# AWS SDK within EKS Pod
