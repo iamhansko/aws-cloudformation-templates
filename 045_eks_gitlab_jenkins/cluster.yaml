@@ -28,7 +28,7 @@ Parameters:
     Type: String
     Default: "False"
     AllowedValues: ["True", "False"]
-    Description: SeucirtyGroup Inbound Rule (Source 0.0.0.0/0)
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
   KubernetesVersion:
     Description: EKS Cluster Kubernetes Version (1.XX)
     Type: String
