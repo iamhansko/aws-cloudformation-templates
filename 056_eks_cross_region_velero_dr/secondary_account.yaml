@@ -1,5 +1,11 @@
 Transform: AWS::LanguageExtensions
 Parameters:
+  PrimaryAccountId:
+    Type: String
+    Description: Primary EKS Cluster - AWS Account ID
+  SecondaryS3BucketName:
+    Type: String
+    Description: Secondary EKS Cluster - S3 Bucket Name
   InboundFromAnywhere:
     Type: String
     Default: "False"
@@ -8,8 +14,8 @@ Parameters:
   KubernetesVersion:
     Description: EKS Cluster Kubernetes Version (1.XX)
     Type: String
-    Default: "1.33"
-    AllowedValues: ["1.31", "1.32", "1.33"]
+    Default: "1.34"
+    AllowedValues: ["1.32", "1.33", "1.34"]
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
@@ -143,7 +149,6 @@ Resources:
   VsCodeEc2:
     Type: AWS::EC2::Instance
     DependsOn:
-      - PrimaryNodeGroup
       - SecondaryNodeGroup
     CreationPolicy:
       ResourceSignal:
@@ -158,7 +163,6 @@ Resources:
           DeviceIndex: 0
           SubnetId: !Ref PublicSubneta
           GroupSet: 
-            - !GetAtt PrimaryCluster.ClusterSecurityGroupId
             - !GetAtt SecondaryCluster.ClusterSecurityGroupId
             - !Ref VsCodeEc2SecurityGroup
       Tags: 
@@ -234,27 +238,12 @@ Resources:
           provisioner: ebs.csi.aws.com
           reclaimPolicy: Delete
           volumeBindingMode: WaitForFirstConsumer' > manifests/storageclass.yaml
-          echo 'apiVersion: v1
-          kind: Service
-          metadata:
-            name: nginx
-            labels:
-              app: nginx
-          spec:
-            type: LoadBalancer
-            ports:
-            - port: 80
-              name: web
-            selector:
-              app: nginx
-          ---
-          apiVersion: apps/v1
+          echo 'apiVersion: apps/v1
           kind: StatefulSet
           metadata:
             name: web
           spec:
-            serviceName: "nginx"
-            replicas: 2
+            replicas: 3
             selector:
               matchLabels:
                 app: nginx
@@ -265,7 +254,7 @@ Resources:
               spec:
                 containers:
                 - name: nginx
-                  image: registry.k8s.io/nginx-slim:0.8
+                  image: nginx
                   ports:
                   - containerPort: 80
                     name: web
@@ -290,26 +279,11 @@ Resources:
           driver: ebs.csi.aws.com
           deletionPolicy: Delete' > manifests/volumesnapshotclass.yaml
 
-          aws eks update-kubeconfig --region ${AWS::Region} --name ${PrimaryCluster} --alias primary
-          helm repo add eks https://aws.github.io/eks-charts
-          helm repo update eks
-          helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
-          --set clusterName=${PrimaryCluster} \
-          --set serviceAccount.name=aws-load-balancer-controller \
-          --set region=${AWS::Region} \
-          --set vpcId=${Vpc}
-          sleep 60
-          kubectl apply -f manifests/storageclass.yaml
-          kubectl kustomize https://github.com/kubernetes-csi/external-snapshotter/client/config/crd | kubectl create -f -
-          kubectl -n kube-system kustomize https://github.com/kubernetes-csi/external-snapshotter/deploy/kubernetes/snapshot-controller | kubectl create -f -
-          kubectl apply -f manifests/volumesnapshotclass.yaml
-          kubectl apply -f manifests/statefulset.yaml
-
           aws eks update-kubeconfig --region ${AWS::Region} --name ${SecondaryCluster} --alias secondary
           helm repo add eks https://aws.github.io/eks-charts
           helm repo update eks
           helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
-          --set clusterName=${PrimaryCluster} \
+          --set clusterName=${SecondaryCluster} \
           --set serviceAccount.name=aws-load-balancer-controller \
           --set region=${AWS::Region} \
           --set vpcId=${Vpc}
@@ -330,7 +304,7 @@ Resources:
           velero install --wait \
           --provider aws \
           --plugins velero/velero-plugin-for-aws:v1.13.0 \
-          --bucket ${S3Bucket} \
+          --bucket ${SecondaryS3Bucket} \
           --backup-location-config region=${AWS::Region} \
           --snapshot-location-config region=${AWS::Region} \
           --features EnableCSI \
@@ -343,8 +317,6 @@ Resources:
           ' > /home/ec2-user/velero.sh
           chmod +x /home/ec2-user/velero.sh
           kubectl config use-context secondary
-          /home/ec2-user/velero.sh
-          kubectl config use-context primary
           /home/ec2-user/velero.sh
           EOF
 
@@ -450,39 +422,39 @@ Resources:
       Policies:
         - PolicyName: AWSLoadBalancerControllerPolicy
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: 2012-10-17
             Statement:
-              - Effect: "Allow"
+              - Effect: Allow
                 Action:
-                  - "iam:CreateServiceLinkedRole"
+                  - iam:CreateServiceLinkedRole
                 Resource: "*"
                 Condition:
                   StringEquals: 
-                    "iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"
-              - Effect: "Allow"
+                    "iam:AWSServiceName": elasticloadbalancing.amazonaws.com
+              - Effect: Allow
                 Action: 
-                  - "ec2:*"
-                  - "elasticloadbalancing:*"
+                  - ec2:*
+                  - elasticloadbalancing:*
                 Resource: "*"
-              - Effect: "Allow"
+              - Effect: Allow
                 Action: 
-                  - "cognito-idp:DescribeUserPoolClient"
-                  - "acm:ListCertificates"
-                  - "acm:DescribeCertificate"
-                  - "iam:ListServerCertificates"
-                  - "iam:GetServerCertificate"
-                  - "waf-regional:GetWebACL"
-                  - "waf-regional:GetWebACLForResource"
-                  - "waf-regional:AssociateWebACL"
-                  - "waf-regional:DisassociateWebACL"
-                  - "wafv2:GetWebACL"
-                  - "wafv2:GetWebACLForResource"
-                  - "wafv2:AssociateWebACL"
-                  - "wafv2:DisassociateWebACL"
-                  - "shield:GetSubscriptionState"
-                  - "shield:DescribeProtection"
-                  - "shield:CreateProtection"
-                  - "shield:DeleteProtection"
+                  - cognito-idp:DescribeUserPoolClient
+                  - acm:ListCertificates
+                  - acm:DescribeCertificate
+                  - iam:ListServerCertificates
+                  - iam:GetServerCertificate
+                  - waf-regional:GetWebACL
+                  - waf-regional:GetWebACLForResource
+                  - waf-regional:AssociateWebACL
+                  - waf-regional:DisassociateWebACL
+                  - wafv2:GetWebACL
+                  - wafv2:GetWebACLForResource
+                  - wafv2:AssociateWebACL
+                  - wafv2:DisassociateWebACL
+                  - shield:GetSubscriptionState
+                  - shield:DescribeProtection
+                  - shield:CreateProtection
+                  - shield:DeleteProtection
                 Resource: "*"
   
   VeleroSourceRole:
@@ -527,7 +499,7 @@ Resources:
   # EksClusters
   Fn::ForEach::Clusters:
     - Prefix
-    - [Primary, Secondary]
+    - [Secondary]
     - ${Prefix}Cluster:
         Type: AWS::EKS::Cluster
         Properties:
@@ -651,30 +623,33 @@ Resources:
           RoleArn: !GetAtt VeleroSourceRole.Arn
           ServiceAccount: velero
   
-  S3Bucket:
+  SecondaryS3Bucket:
     Type: AWS::S3::Bucket
     Properties:
+      BucketName: !Sub ${SecondaryS3BucketName}
       VersioningConfiguration:
         Status: Enabled
-
-  # SsmAssociation:
-  #   Type: AWS::SSM::Association
-  #   DependsOn:
-  #     - VsCodeEc2 # Required
-  #   Properties:
-  #     Name: AWS-RunShellScript
-  #     WaitForSuccessTimeoutSeconds: 600
-  #     Targets:
-  #       - Key: InstanceIds
-  #         Values:
-  #           - !Ref VsCodeEc2
-  #     Parameters:
-  #       commands: 
-  #         # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
-  #         - !Sub |
-  #             su - ec2-user << 'SSMEOF'
-  #             export HOME=/home/ec2-user && cd $HOME
-  #             SSMEOF
+  PrimaryS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SecondaryS3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${PrimaryAccountId}:role/PrimaryS3ReplicationIamRole
+            Action:
+              - s3:ReplicateObject
+              - s3:ReplicateDelete
+            Resource: !Sub arn:aws:s3:::${SecondaryS3BucketName}/*
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${PrimaryAccountId}:role/PrimaryS3ReplicationIamRole
+            Action:
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning
+            Resource: !Sub arn:aws:s3:::${SecondaryS3BucketName}
 
 Outputs:
   VsCode:
