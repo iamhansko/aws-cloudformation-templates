@@ -1,0 +1,340 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Resources:
+  Ec2OriginLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaFunctionRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = (event, context, callback) => {
+            console.log("event");
+            console.log(JSON.stringify(event));
+
+            console.log("context");
+            console.log(JSON.stringify(context));
+
+            const request = event.Records[0].cf.request;
+            const headers = request.headers;
+            
+            console.log(`REQUEST : ${request.method} ${request.uri} FROM ${request.clientIp}`);
+            
+            callback(null, request);
+          };
+  S3OriginLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaFunctionRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = (event, context, callback) => {
+            console.log("event");
+            console.log(JSON.stringify(event));
+
+            console.log("context");
+            console.log(JSON.stringify(context));
+
+            const request = event.Records[0].cf.request;
+            const headers = request.headers;
+            
+            console.log(`REQUEST : ${request.method} ${request.uri} FROM ${request.clientIp}`);
+            
+            callback(null, request);
+          };
+  S3OriginLambdaVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref S3OriginLambdaFunction
+  Ec2OriginLambdaVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref Ec2OriginLambdaFunction
+  LambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - edgelambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: False
+        BlockPublicPolicy: False
+        IgnorePublicAcls: False
+        RestrictPublicBuckets: False
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: 
+              - s3:GetObject
+            Resource: !Sub ${S3Bucket.Arn}/*
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: True
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+          LambdaFunctionAssociations:
+            - EventType: viewer-request
+              LambdaFunctionARN: !Ref S3OriginLambdaVersion
+        CacheBehaviors:
+          - PathPattern: /code
+            TargetOriginId: Ec2Origin
+            Compress: True
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: 
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - POST
+              - PATCH
+              - DELETE
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # AllViewer
+            LambdaFunctionAssociations: 
+              - EventType: viewer-request
+                LambdaFunctionARN: !Ref Ec2OriginLambdaVersion
+          - PathPattern: /code/*
+            TargetOriginId: Ec2Origin
+            Compress: True
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: 
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - POST
+              - PATCH
+              - DELETE
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # AllViewer
+            LambdaFunctionAssociations: 
+              - EventType: viewer-request
+                LambdaFunctionARN: !Ref Ec2OriginLambdaVersion
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt S3Bucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: Ec2Origin
+            DomainName: !GetAtt VsCodeEc2.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub public-subnet
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId:
+        Ref: !Sub PublicSubnet
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT7M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet
+          GroupSet: 
+            - !Ref VsCodeEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git
+          dnf groupinstall -yq "Development Tools"
+
+          export VSC_VERSION="4.104.2"
+          wget -q https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          dnf install -yq nginx
+          echo 'server {
+            location = /code {
+              return 302 /code/$is_args$args;
+            }
+            location /code/ {
+              proxy_pass http://localhost:8000/;
+              proxy_set_header Host $http_host;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection upgrade;
+              proxy_set_header Accept-Encoding gzip;
+            }
+          }' > /etc/nginx/conf.d/code-server.conf
+          systemctl restart nginx
+
+          dnf install -yq docker
+          systemctl enable --now docker
+          # usermod -aG docker ec2-user
+          # newgrp docker
+          chmod 666 /var/run/docker.sock
+
+          cd /home/ec2-user
+          echo "<h2>Hello World</h2>" > index.html
+          aws s3 cp index.html s3://${S3Bucket}
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vscode-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 80,
+          "ToPort": 80,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: vscode-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref VsCodeEc2IamRole
+
+Outputs:
+  DistributionDomainName:
+    Description: CloudFront Distribution Domain Name
+    Value: !Sub https://${CloudFrontDistribution.DomainName}/code
