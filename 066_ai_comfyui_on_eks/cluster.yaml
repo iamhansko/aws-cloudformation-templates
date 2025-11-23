@@ -7,7 +7,7 @@ Parameters:
     Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
 Conditions:
   SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
 
@@ -78,7 +78,7 @@ Resources:
         Timeout: PT7M
     Properties:
       ImageId: !Ref AmiId
-      InstanceType: t3.medium
+      InstanceType: t3.xlarge
       KeyName: !Ref KeyPair
       NetworkInterfaces: 
         - AssociatePublicIpAddress: True
@@ -86,6 +86,13 @@ Resources:
           SubnetId: !Ref PublicSubnet
           GroupSet: 
             - !Ref VsCodeEc2SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 80
+            DeleteOnTermination: true
+            Encrypted: false
       Tags: 
         - Key: Name
           Value: vscode
@@ -94,38 +101,32 @@ Resources:
         # sudo tail -f /var/log/cloud-init-output.log
         Fn::Base64: !Sub |
           #!/bin/bash
-          dnf update -yq
-          dnf install -yq git
-          dnf groupinstall -yq "Development Tools"
-
-          dnf install -yq python3.13
-          ln -sf /usr/bin/python3.13 /usr/bin/python
-          python -m ensurepip --upgrade
-
-          dnf install -yq git
-          dnf install -yq nodejs
-          npm install -g aws-cdk
+          apt update -yq
+          apt upgrade -yq
+          apt install -yq python3-pip
+          apt install -yq python3-venv
+          apt install -yq git
 
           export VSC_VERSION="4.105.1"
           wget -q https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
           tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
           mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
           ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
-          mkdir -p /home/ec2-user/.config/code-server
-          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          mkdir -p /home/ubuntu/.config/code-server
+          cat <<EOF > /home/ubuntu/.config/code-server/config.yaml
           bind-addr: 0.0.0.0:8000
           auth: none
           cert: false
           EOF
-          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          chown -R ubuntu:ubuntu /home/ubuntu/.config
           cat <<EOF > /etc/systemd/system/code-server.service
           [Unit]
           Description=VS Code Server
           After=network.target
           [Service]
           Type=simple
-          User=ec2-user
-          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          User=ubuntu
+          ExecStart=/usr/local/bin/code-server --config /home/ubuntu/.config/code-server/config.yaml /home/ubuntu
           Restart=always
           [Install]
           WantedBy=multi-user.target
@@ -134,48 +135,11 @@ Resources:
           systemctl enable code-server
           systemctl start code-server
 
-          dnf install -yq docker
-          systemctl enable --now docker
-          # usermod -aG docker ec2-user
-          # newgrp docker
-          chmod 666 /var/run/docker.sock
-
-          cd /home/ec2-user
-          mkdir -p /home/ec2-user/bin
-          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.3/2025-08-03/bin/linux/amd64/kubectl
-          chmod +x kubectl
-          mv kubectl /home/ec2-user/bin/kubectl
-          export PATH=/home/ec2-user/bin:$PATH
-          echo "export PATH=/home/ec2-user/bin:$PATH" >> /home/ec2-user/.bashrc
-          echo "alias k=kubectl" >> /home/ec2-user/.bashrc
-          echo "complete -o default -F __start_kubectl k" >> /home/ec2-user/.bashrc
-          echo "source <(kubectl completion bash)" >> /home/ec2-user/.bashrc
-
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
-
-          curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > /home/ec2-user/get_helm.sh
-          chmod 700 /home/ec2-user/get_helm.sh
-          /home/ec2-user/get_helm.sh
-
-          rm -rf ~/comfyui-on-eks && git clone https://github.com/aws-samples/comfyui-on-eks ~/comfyui-on-eks
-          cd ~/comfyui-on-eks
-          region="${AWS::Region}"
-          project=""
-          if [[ x$project == 'x' ]]
-          then
-            project_dir="$HOME/comfyui-on-eks"
-          else
-            mv $HOME/comfyui-on-eks $HOME/comfyui-on-eks-$project
-            project_dir="$HOME/comfyui-on-eks-$project"
-          fi
-          sed -i "s/export AWS_DEFAULT_REGION=.*/export AWS_DEFAULT_REGION=$region/g" $project_dir/auto_deploy/env.sh
-          sed -i "s/export PROJECT_NAME=.*/export PROJECT_NAME=$project/g" $project_dir/auto_deploy/env.sh
-          cd $project_dir/auto_deploy/ && bash env_prepare.sh
-          source ~/.bashrc && cd $project_dir/auto_deploy/ && bash deploy_infra.sh
-          # cd $project_dir/auto_deploy/ && bash destroy_infra.sh
-
-          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+          mkdir /home/ubuntu/python
+          python3 -m venv /home/ubuntu/python
+          source /home/ubuntu/python/bin/activate
+          python3 -m pip install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+          cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
   VsCodeEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -211,6 +175,39 @@ Resources:
     Properties:
       Roles: 
         - !Ref VsCodeEc2IamRole
+  
+  SsmAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 14400
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref VsCodeEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              sudo -u ubuntu bash << 'EOF'
+              cd /home/ubuntu
+              rm -rf /home/ubuntu/comfyui-on-eks && git clone https://github.com/aws-samples/comfyui-on-eks /home/ubuntu/comfyui-on-eks
+              cd /home/ubuntu/comfyui-on-eks
+              region=${AWS::Region}
+              project=""
+              if [[ x$project == 'x' ]]
+              then
+                project_dir="/home/ubuntu/comfyui-on-eks"
+              else
+                mv /home/ubuntu/comfyui-on-eks /home/ubuntu/comfyui-on-eks-$project
+                project_dir="/home/ubuntu/comfyui-on-eks-$project"
+              fi
+              sed -i "s/export AWS_DEFAULT_REGION=.*/export AWS_DEFAULT_REGION=$region/g" $project_dir/auto_deploy/env.sh
+              sed -i "s/export PROJECT_NAME=.*/export PROJECT_NAME=$project/g" $project_dir/auto_deploy/env.sh
+              cd $project_dir/auto_deploy/ && bash env_prepare.sh
+              source /home/ubuntu/.bashrc && cd $project_dir/auto_deploy/ && bash deploy_infra.sh
+              # cd $project_dir/auto_deploy/ && bash destroy_infra.sh
+              EOF
 
 Outputs:
   VsCode:
