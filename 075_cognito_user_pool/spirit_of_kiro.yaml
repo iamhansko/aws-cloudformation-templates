@@ -1,0 +1,1035 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates Cognito User Pool and App Client for the game authentication
+
+Transform: AWS::LanguageExtensions
+Parameters:
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+  Environment:
+    Type: String
+    Description: Environment name (e.g., dev, prod)
+    Default: dev
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+  EcsServiceMapping:
+    Server:
+      ContainerPort: 8080
+      AlbSecurityGroupIngress: ServerSecurityGroup
+    ImageGeneration:
+      ContainerPort: 3001
+      AlbSecurityGroupIngress: ServerSecurityGroup
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: preferred_username
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+      UsernameAttributes:
+        - email
+      UsernameConfiguration:
+        CaseSensitive: false
+      UserPoolAddOns:
+        AdvancedSecurityMode: "OFF"
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - USER_PASSWORD_AUTH
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+  
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, b]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, b]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+
+  ServerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: True
+  ClientRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: True
+  ImageGenerationRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: True
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - UserPoolClient
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT10M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref VsCodeEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git
+          dnf groupinstall -yq "Development Tools"
+
+          dnf install -yq git
+          dnf install -yq docker
+          systemctl enable --now docker
+          # usermod -aG docker ec2-user
+          # newgrp docker
+          chmod 666 /var/run/docker.sock
+
+          export VSC_VERSION="4.106.2"
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          cd /home/ec2-user
+          git clone https://github.com/iamhansko/spirit-of-kiro.git
+          chown -R ec2-user:ec2-user /home/ec2-user/spirit-of-kiro/
+          
+          sudo -Eu ec2-user bash << 'EOF'
+          curl -fsSL https://bun.com/install | bash
+          source /home/ec2-user/.bash_profile
+          cd /home/ec2-user/spirit-of-kiro/client
+          echo "declare module '*.vue'" > ./src/shims-vue.d.ts
+          bun install
+          bun run build 
+          EOF
+          aws s3 cp --recursive /home/ec2-user/spirit-of-kiro/client/dist/ s3://${ClientBucket}
+          
+          cd /home/ec2-user/spirit-of-kiro
+          aws ecr get-login-password | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+          docker build -t "${ServerRepository.RepositoryUri}:latest" ./server
+          docker push "${ServerRepository.RepositoryUri}:latest"
+          docker build -t "${ImageGenerationRepository.RepositoryUri}:latest" ./item-images
+          docker push "${ImageGenerationRepository.RepositoryUri}:latest"
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vscode-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: vscode-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref VsCodeEc2IamRole
+  
+  ServerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - VsCodeEc2
+    Properties:
+      Family: server-taskdef
+      Cpu: 1024
+      Memory: 2048
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ContainerDefinitions:
+        - Name: main
+          Image: !Sub ${ServerRepository.RepositoryUri}:latest
+          Essential: true
+          PortMappings:
+            - ContainerPort: !FindInMap [EcsServiceMapping, Server, ContainerPort]
+              HostPort: !FindInMap [EcsServiceMapping, Server, ContainerPort]
+              Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: !FindInMap [EcsServiceMapping, Server, ContainerPort]
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: DYNAMODB_TABLE_ITEMS
+              Value: !Ref ItemsTable
+            - Name: DYNAMODB_TABLE_INVENTORY
+              Value: !Ref InventoryTable
+            - Name: DYNAMODB_TABLE_LOCATION
+              Value: !Ref LocationTable
+            - Name: DYNAMODB_TABLE_USERS
+              Value: !Ref UsersTable
+            - Name: DYNAMODB_TABLE_USERNAMES
+              Value: !Ref UsernamesTable
+            - Name: DYNAMODB_TABLE_PERSONA
+              Value: !Ref PersonaTable
+            - Name: COGNITO_USER_POOL_ID
+              Value: !Ref UserPool
+            - Name: COGNITO_CLIENT_ID
+              Value: !Ref UserPoolClient
+            - Name: ITEM_IMAGES_SERVICE_URL
+              Value: !Sub http://${ImageGenerationAlb.DNSName}
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ServerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+  ServerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/ecs/${EcsCluster}/server"
+      RetentionInDays: 30
+  
+  ImageGenerationTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - VsCodeEc2
+    Properties:
+      Family: item-images-taskdef
+      Cpu: 1024
+      Memory: 2048
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ContainerDefinitions:
+        - Name: main
+          Image: !Sub ${ImageGenerationRepository.RepositoryUri}:latest
+          Essential: true
+          PortMappings:
+            - ContainerPort: !FindInMap [EcsServiceMapping, ImageGeneration, ContainerPort]
+              HostPort: !FindInMap [EcsServiceMapping, ImageGeneration, ContainerPort]
+              Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: !FindInMap [EcsServiceMapping, ImageGeneration, ContainerPort]
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: S3_BUCKET_NAME
+              Value: !Ref ImageBucket
+            - Name: CLOUDFRONT_DOMAIN
+              Value: !GetAtt ImageCloudFrontDistribution.DomainName
+            - Name: REDIS_HOST
+              Value: !GetAtt MemoryDBCluster.ClusterEndpoint.Address
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ImageGenerationLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+  ImageGenerationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/ecs/${EcsCluster}/item-images"
+      RetentionInDays: 30
+  
+  ClientBucket:
+    Type: AWS::S3::Bucket
+  ClientOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: ClientS3BucketOriginAccessControl
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  ClientCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http3
+        Origins:
+          - DomainName: !GetAtt ClientBucket.RegionalDomainName
+            Id: S3Origin
+            OriginAccessControlId: !GetAtt ClientOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - DomainName: !GetAtt ServerAlb.DNSName
+            Id: WebSocketOrigin
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginKeepaliveTimeout: 15
+              OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          Compress: true
+          MinTTL: 3600
+          DefaultTTL: 86400
+          MaxTTL: 31536000
+        CacheBehaviors:
+          - PathPattern: /ws*
+            TargetOriginId: WebSocketOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - POST
+              - PATCH
+              - DELETE
+            CachedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            ForwardedValues:
+              QueryString: true
+              Headers:
+                - Origin
+                - Access-Control-Request-Headers
+                - Access-Control-Request-Method
+                - Sec-WebSocket-Key
+                - Sec-WebSocket-Version
+                - Sec-WebSocket-Protocol
+                - Sec-WebSocket-Accept
+                - Sec-WebSocket-Extensions
+              Cookies:
+                Forward: none
+            Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        PriceClass: PriceClass_100
+  ClientBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ClientBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub arn:aws:s3:::${ClientBucket}/*
+            Condition:
+              StringEquals:
+                "AWS:SourceArn": !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${ClientCloudFrontDistribution}
+              Bool:
+                aws:SecureTransport: "true"
+  
+  ImageBucket:
+    Type: AWS::S3::Bucket
+  ImageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ImageBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${ImageBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                "AWS:SourceArn": !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${ImageCloudFrontDistribution}
+              Bool:
+                aws:SecureTransport: "true"
+  ImageOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: ImageS3BucketOriginAccessControl
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  ImageCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        DefaultCacheBehavior:
+          ViewerProtocolPolicy: redirect-to-https
+          TargetOriginId: ItemImageBucketOrigin
+          AllowedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+          MinTTL: 3600
+          DefaultTTL: 86400
+          MaxTTL: 31536000
+          Compress: true
+        Enabled: true
+        HttpVersion: http3
+        Origins:
+          - Id: ItemImageBucketOrigin
+            DomainName: !GetAtt ImageBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt ImageOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+  
+  ServerAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetb
+      SecurityGroups:
+        - Ref: !Sub ServerAlbSecurityGroup
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+  ImageGenerationAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetb
+      SecurityGroups:
+        - Ref: !Sub ImageGenerationAlbSecurityGroup
+      Scheme: internal
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enhanced
+  Fn::ForEach::EcsServices:
+    - Prefix
+    - [Server, ImageGeneration]
+    - ${Prefix}AlbListener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+          LoadBalancerArn:
+            Ref: !Sub ${Prefix}Alb
+          Port: 80
+          Protocol: HTTP
+          DefaultActions:
+            - Type: forward
+              TargetGroupArn:
+                Ref: !Sub ${Prefix}TargetGroup
+      ${Prefix}TargetGroup:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+          Port: !FindInMap [EcsServiceMapping, !Ref Prefix, ContainerPort]
+          Protocol: HTTP
+          VpcId: !Ref Vpc
+          TargetType: ip
+          HealthCheckPath: /
+          HealthCheckIntervalSeconds: 30
+          HealthCheckTimeoutSeconds: 5
+          HealthyThresholdCount: 2
+          UnhealthyThresholdCount: 3
+          TargetGroupAttributes:
+            - Key: stickiness.enabled
+              Value: true
+            - Key: stickiness.type
+              Value: lb_cookie
+      ${Prefix}EcsService:
+        Type: AWS::ECS::Service
+        DependsOn:
+          - !Sub ${Prefix}AlbListener
+        Properties:
+          Cluster: !Ref EcsCluster
+          TaskDefinition:
+            Ref: !Sub ${Prefix}TaskDefinition
+          DesiredCount: 2
+          LaunchType: FARGATE
+          NetworkConfiguration:
+            AwsvpcConfiguration:
+              AssignPublicIp: DISABLED
+              Subnets:
+                - !Ref PrivateSubneta
+                - !Ref PrivateSubnetb
+              SecurityGroups:
+                - Ref: !Sub ${Prefix}SecurityGroup
+          LoadBalancers:
+            - ContainerName: main
+              ContainerPort: !FindInMap [EcsServiceMapping, !Ref Prefix, ContainerPort]
+              TargetGroupArn: 
+                Ref: !Sub ${Prefix}TargetGroup
+      ${Prefix}SecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+          GroupDescription: Security group for ecs service
+          VpcId: !Ref Vpc
+          SecurityGroupIngress:
+            - IpProtocol: tcp
+              FromPort: !FindInMap [EcsServiceMapping, !Ref Prefix, ContainerPort]
+              ToPort: !FindInMap [EcsServiceMapping, !Ref Prefix, ContainerPort]
+              SourceSecurityGroupId:
+                Ref: !Sub ${Prefix}AlbSecurityGroup
+              Description: Allow inbound traffic from load balancer to container port
+          SecurityGroupEgress:
+            - IpProtocol: -1
+              CidrIp: 0.0.0.0/0
+              Description: Allow all outbound traffic
+          Tags:
+            - Key: Name
+              Value: !Sub ${Prefix}-ecs-service-sg
+      ${Prefix}AlbSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+          GroupDescription: Security group for load balancer
+          VpcId: !Ref Vpc
+          SecurityGroupIngress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: !GetAtt Vpc.CidrBlock
+              Description: Allow inbound HTTP traffic from Vpc
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              SourcePrefixListId: !GetAtt CloudFrontPrefixList.PrefixListId
+              Description: Allow inbound HTTP traffic from CloudFront
+          SecurityGroupEgress:
+            - IpProtocol: -1
+              CidrIp: 0.0.0.0/0
+              Description: Allow all outbound traffic
+          Tags:
+            - Key: Name
+              Value: !Sub ${Prefix}-alb-sg
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EcrAndCloudWatchPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: 
+                  - !GetAtt ServerRepository.Arn
+                  - !GetAtt ClientRepository.Arn
+                  - !GetAtt ImageGenerationRepository.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub ${ServerLogGroup.Arn}:*
+                  - !Sub ${ImageGenerationLogGroup.Arn}:*
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TaskPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              # DynamoDB
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  - !GetAtt ItemsTable.Arn
+                  - !GetAtt InventoryTable.Arn
+                  - !GetAtt LocationTable.Arn
+                  - !GetAtt UsersTable.Arn
+                  - !GetAtt UsernamesTable.Arn
+                  - !GetAtt PersonaTable.Arn
+              # Bedrock
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+              # Cognito
+              - Effect: Allow
+                Action:
+                  - cognito-idp:SignUp
+                  - cognito-idp:InitiateAuth
+                  - cognito-idp:GetUser
+                  - cognito-idp:AdminConfirmSignUp
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminUpdateUserAttributes
+                Resource: !GetAtt UserPool.Arn
+              # S3
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource: "*"
+
+  ItemsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: Items
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+  InventoryTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: Inventory
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: itemId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+        - AttributeName: itemId
+          KeyType: RANGE
+  LocationTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: Location
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: itemId
+          AttributeType: S
+        - AttributeName: location
+          AttributeType: S
+      KeySchema:
+        - AttributeName: itemId
+          KeyType: HASH
+        - AttributeName: location
+          KeyType: RANGE
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: Users
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+  UsernamesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: Usernames
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: username
+          AttributeType: S
+      KeySchema:
+        - AttributeName: username
+          KeyType: HASH
+  PersonaTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: Persona
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: detail
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: detail
+          KeyType: RANGE
+  
+  MemoryDBCluster:
+    Type: AWS::MemoryDB::Cluster
+    Properties:
+      ClusterName: memorydb
+      NodeType: db.r6g.large
+      EngineVersion: 7.1
+      NumShards: 1
+      NumReplicasPerShard: 0
+      SubnetGroupName: !Ref MemoryDBSubnetGroup
+      ParameterGroupName: default.memorydb-redis7.search
+      SecurityGroupIds:
+        - !GetAtt MemoryDBSecurityGroup.GroupId
+      ACLName: open-access
+      TLSEnabled: false
+      MaintenanceWindow: "sun:05:00-sun:06:00"
+      SnapshotRetentionLimit: 7
+  MemoryDBSubnetGroup:
+    Type: AWS::MemoryDB::SubnetGroup
+    Properties:
+      Description: Subnet group for MemoryDB cluster
+      SubnetIds:
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetb
+      SubnetGroupName: memorydb-subnet-group
+  MemoryDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for MemoryDB cluster
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref ImageGenerationSecurityGroup
+          Description: Allow traffic from Fargate service to MemoryDB
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          CidrIp: !GetAtt Vpc.CidrBlock
+          Description: Allow inbound Redis traffic from VPC CIDR
+      Tags:
+        - Key: Name
+          Value: memorydb-sg
+
+  CloudFrontPrefixList:
+    Type: Custom::ManagedPrefixList
+    Properties:
+      ServiceToken: !GetAtt CustomLambdaFunction.Arn
+      PrefixListName: com.amazonaws.global.cloudfront.origin-facing
+  CustomLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomLambdaIamRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import json
+          
+          def lambda_handler(event, context):
+            print(json.dumps(event))            
+            try:
+              if event["RequestType"] == "Delete":
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                return
+              ec2 = boto3.client("ec2")
+              prefix_list_name = event["ResourceProperties"]["PrefixListName"]
+              prefix_list_data = ec2.describe_managed_prefix_lists(Filters=[{"Name":"prefix-list-name","Values":[prefix_list_name]}])
+              prefix_list_id = prefix_list_data["PrefixLists"][0]["PrefixListId"]
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {"PrefixListId": prefix_list_id})
+            except Exception as error:
+              print(f"Error: {str(e)}")
+              cfnresponse.send(event, context, cfnresponse.FAILED, {}, reason=str(error))
+  CustomLambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaFunctionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeManagedPrefixLists
+                Resource: "*"
+
+Outputs:  
+  VsCode:
+    Description: Public IP Address of the VS Code Server EC2 instance
+    Value: !Sub http://${VsCodeEc2.PublicIp}:8000
+  GameClient:
+    Description: Domain Name of the Game Client CloudFront Distribution
+    Value: !Sub https://${ClientCloudFrontDistribution.DomainName}
