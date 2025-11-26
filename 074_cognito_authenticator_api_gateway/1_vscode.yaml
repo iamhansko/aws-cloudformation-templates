@@ -1,0 +1,597 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, b]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, b]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+
+  ServerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: True
+  ClientRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: True
+  ImageGenerationRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: True
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      # - UserPoolClient
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT10M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref VsCodeEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git
+          dnf groupinstall -yq "Development Tools"
+
+          dnf install -yq git
+          dnf install -yq docker
+          systemctl enable --now docker
+          # usermod -aG docker ec2-user
+          # newgrp docker
+          chmod 666 /var/run/docker.sock
+
+          export VSC_VERSION="4.106.2"
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          cd /home/ec2-user
+          export SAM_VERSION=1.148.0
+          wget -q https://github.com/aws/aws-sam-cli/releases/download/v$SAM_VERSION/aws-sam-cli-linux-x86_64.zip
+          unzip aws-sam-cli-linux-x86_64.zip -d sam-installation
+          ./sam-installation/install
+          rm -rf sam-installation/
+          rm -f aws-sam-cli-linux-x86_64.zip
+
+          dnf install -yq nodejs
+          npm install -g esbuild
+          
+          # sudo -Eu ec2-user bash << 'EOF'
+          # EOF
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vscode-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: vscode-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref VsCodeEc2IamRole
+  
+  SsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - VsCodeEc2
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 1800
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref VsCodeEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              cd /home/ec2-user
+              mkdir -p /home/ec2-user/workshop/cognito-web/web-app/authn
+              echo "import express from 'express';
+              const router = express.Router();
+              export default router;" > /home/ec2-user/workshop/cognito-web/web-app/authn/app.js
+              mkdir -p /home/ec2-user/workshop/cognito-web/web-app/public
+              echo '<!doctype html>
+              <html lang="en">
+                <head>
+                  <meta charset="utf-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1">
+                  <title>Amazon Cognito SDK</title>
+                  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-rbsA2VBKQhggwzxH7pPCaAqO46MgnOM80zW1RWuH61DGLwZJEdK2Kadq2F9CUG65" crossorigin="anonymous">
+                  <style>
+                    html, body { height: 100%; }
+                    body { display: flex; align-items: center; padding-top: 40px; padding-bottom: 40px; background-color: #f5f5f5; }
+                    .form-signup { max-width: 600px; padding: 15px; }
+                    .form-signup .form-floating:focus-within { z-index: 2; }
+                    .form-signup #floatingName, .form-signup #nav-sign-in #floatingUsername, .form-signup #nav-sign-in #floatingUsername1, .form-signup #floatingBucket { margin-bottom: -1px; border-bottom-right-radius: 0; border-bottom-left-radius: 0; }
+                    .form-signup input[type="email"], .form-signup #nav-sign-up #floatingUsername { margin-bottom: -1px; border-radius: 0; }
+                    .form-signup input[type="password"], .form-signup #nav-s3 #floatingPrefix { margin-bottom: 10px; border-top-left-radius: 0; border-top-right-radius: 0; }
+                    .input-group, .alert { margin: 10px 0; }
+                    .tab-pane { padding: 10px 0; min-height: 350px; }
+                  </style>
+                </head>
+                <body class="text-center">
+                  <main class="form-signup w-100 m-auto">
+                    <nav>
+                      <div class="nav nav-tabs" id="nav-tab" role="tablist">
+                        <button class="nav-link active" id="nav-sign-up-tab" data-bs-toggle="tab" data-bs-target="#nav-sign-up" type="button" role="tab" aria-controls="nav-sign-up" aria-selected="true">Sign Up</button>
+                        <button class="nav-link" id="nav-sign-in-tab" data-bs-toggle="tab" data-bs-target="#nav-sign-in" type="button" role="tab" aria-controls="nav-sign-in" aria-selected="false">Sign In</button>
+                        <button class="nav-link" id="nav-mfa-tab" data-bs-toggle="tab" data-bs-target="#nav-mfa" type="button" role="tab" aria-controls="nav-mfa" aria-selected="false">Manage MFA</button>
+                        <button class="nav-link" id="nav-call-apis-tab" data-bs-toggle="tab" data-bs-target="#nav-call-apis" type="button" role="tab" aria-controls="nav-call-apis" aria-selected="false">Call APIs</button>
+                        <button class="nav-link" id="nav-s3-tab" data-bs-toggle="tab" data-bs-target="#nav-s3" type="button" role="tab" aria-controls="nav-s3" aria-selected="false">Access S3</button>
+                      </div>
+                    </nav>
+                    <div class="tab-content" id="nav-tabContent">
+                      <div class="tab-pane fade show active" id="nav-sign-up" role="tabpanel" aria-labelledby="nav-sign-up-tab" tabindex="0">
+                        <form class="needs-validation" novalidate id="sign-up-form">
+                          <div class="form-floating">
+                            <input type="text" class="form-control" id="floatingName" placeholder="Name" required>
+                            <label for="floatingName">Name</label>
+                          </div>
+                          <div class="form-floating">
+                            <input type="text" class="form-control" id="floatingUsername" placeholder="Username" required>
+                            <label for="floatingUsername">Username</label>
+                          </div>
+                          <div class="form-floating">
+                            <input type="email" class="form-control" id="floatingEmail" placeholder="name@example.com" required>
+                            <label for="floatingEmail">Email address</label>
+                          </div>
+                          <div class="form-floating">
+                            <input type="password" class="form-control" id="floatingPassword" placeholder="Password" required>
+                            <label for="floatingPassword">Password</label>
+                          </div>
+                          <button class="w-50 btn btn-lg btn-primary" type="submit">Sign Up</button>
+                        </form>
+                      </div>
+                      <div class="tab-pane fade" id="nav-sign-in" role="tabpanel" aria-labelledby="nav-sign-in-tab" tabindex="0">
+                        <form class="needs-validation" novalidate id="sign-in-form">
+                          <div class="form-floating">
+                            <input type="text" class="form-control" id="floatingUsername1" placeholder="Username" required>
+                            <label for="floatingUsername1">Username</label>
+                          </div>
+                          <div class="form-floating">
+                            <input type="password" class="form-control" id="floatingPassword1" placeholder="Password" required>
+                            <label for="floatingPassword1">Password</label>
+                          </div>
+                          <button class="w-40 btn btn-lg btn-primary" type="submit">Sign In</button>
+                          <button class="w-40 btn btn-lg btn-secondary" type="submit">Sign Out</button>
+                        </form>
+                      </div>
+                      <div class="tab-pane fade" id="nav-mfa" role="tabpanel" aria-labelledby="nav-mfa-tab" tabindex="0">
+                        <form class="needs-validation" novalidate id="mfa-form">
+                          <button class="w-40 btn btn-lg btn-primary" type="submit">Enable MFA</button>
+                          <button class="w-40 btn btn-lg btn-secondary" type="submit">Disable MFA</button>
+                          <div class="form-floating">
+                            <canvas id="qrcanvas"></canvas>
+                            <div><button class="w-40 btn btn-sm btn-primary d-none" type="button" id="continue-mfa">Continue</button></div>
+                          </div>
+                        </form>
+                      </div>
+                      <div class="tab-pane fade" id="nav-call-apis" role="tabpanel" aria-labelledby="nav-call-apis-tab" tabindex="0">
+                        <form class="needs-validation" novalidate id="call-apis-form">
+                          <button class="w-50 btn btn-lg btn-primary" type="submit">Call API Gateway</button>
+                        </form>
+                      </div>
+                      <div class="tab-pane fade" id="nav-s3" role="tabpanel" aria-labelledby="nav-s3-tab" tabindex="0">
+                        <form class="needs-validation" novalidate id="s3-form">
+                          <div class="form-floating">
+                            <input type="text" class="form-control" id="floatingBucket" placeholder="Bucket" required>
+                            <label for="floatingBucket">Bucket</label>
+                          </div>
+                          <div class="form-floating">
+                            <input type="text" class="form-control" id="floatingPrefix" placeholder="Prefix" required>
+                            <label for="floatingPrefix">Prefix</label>
+                          </div>
+                          <button class="w-40 btn btn-lg btn-primary" type="submit">List Files</button>
+                        </form>
+                      </div>
+                    </div>
+                    <div id="liveAlertPlaceholder"></div>
+                  </main>
+                  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-kenU1KFdBIe4zVF0s0G1M5b4hcpxyD9F7jL+jjXkk+Q2h455rYXK/7HAuoJl+0I4" crossorigin="anonymous"></script>
+                  <script src="./cognito-sdk.js" type="module"></script>
+                </body>
+              </html>' > /home/ec2-user/workshop/cognito-web/web-app/public/cognito-sdk.html
+              echo '<!doctype html>
+              <html lang="en">
+                <head>
+                  <meta charset="utf-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1">
+                  <title>Amazon Cognito Passwordless Workshop (Sign In)</title>
+                  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-rbsA2VBKQhggwzxH7pPCaAqO46MgnOM80zW1RWuH61DGLwZJEdK2Kadq2F9CUG65" crossorigin="anonymous">
+                  <style>
+                    html, body { height: 100%; }
+                    body { display: flex; align-items: center; padding-top: 40px; padding-bottom: 40px; background-color: #f5f5f5; }
+                    .form-signin { max-width: 330px; padding: 15px; }
+                    .form-signin .form-floating:focus-within { z-index: 2; }
+                    .form-signin input[type="text"], #testButton, #clearButton { margin: 10px 0; }
+                  </style>
+                </head>
+                <body class="text-center">
+                  <main class="form-signin w-100 m-auto">
+                    <form class="needs-validation" novalidate id="zform1">
+                      <h1 class="h3 mb-3 fw-normal">Please sign in</h1>
+                      <div class="form-floating">
+                        <input type="text" class="form-control" id="floatingUsername" placeholder="Username" required>
+                        <label for="floatingUsername">Username</label>
+                      </div>
+                      <button class="w-100 btn btn-lg btn-primary" type="submit">Sign In</button>
+                    </form>
+                    <button class="btn btn-outline-primary" type="button" id="testButton">Test</button>
+                    <button class="btn btn-outline-secondary" type="button" id="clearButton">Clear</button>
+                    <div id="liveAlertPlaceholder"></div>
+                  </main>
+                  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-kenU1KFdBIe4zVF0s0G1M5b4hcpxyD9F7jL+jjXkk+Q2h455rYXK/7HAuoJl+0I4" crossorigin="anonymous"></script>
+                  <script src="signin.js" type="module"></script>
+                </body>
+              </html>' > /home/ec2-user/workshop/cognito-web/web-app/public/signin.html
+              echo '<!doctype html>
+              <html lang="en">
+                <head>
+                  <meta charset="utf-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1">
+                  <title>Amazon Cognito Passwordless Workshop (Sign Up)</title>
+                  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-rbsA2VBKQhggwzxH7pPCaAqO46MgnOM80zW1RWuH61DGLwZJEdK2Kadq2F9CUG65" crossorigin="anonymous">
+                  <style>
+                    html, body { height: 100%; }
+                    body { display: flex; align-items: center; padding-top: 40px; padding-bottom: 40px; background-color: #f5f5f5; }
+                    .form-signup { max-width: 330px; padding: 15px; }
+                    .form-signup .form-floating:focus-within { z-index: 2; }
+                    .form-signup #floatingUsername { margin-bottom: -1px; border-bottom-right-radius: 0; border-bottom-left-radius: 0; }
+                    .form-signup input[type="email"] { margin-bottom: -1px; border-radius: 0; }
+                    .form-signup input[type="password"] { margin-bottom: 10px; border-top-left-radius: 0; border-top-right-radius: 0; }
+                    .input-group, .alert { margin: 10px 0; }
+                  </style>
+                </head>
+                <body class="text-center">
+                  <main class="form-signup w-100 m-auto">
+                    <form class="needs-validation" novalidate id="zform1">
+                      <h1 class="h3 mb-3 fw-normal">Please sign up</h1>
+                      <div class="form-floating">
+                        <input type="text" class="form-control" id="floatingUsername" placeholder="Username" required>
+                        <label for="floatingUsername">Username</label>
+                      </div>
+                      <div class="form-floating">
+                        <input type="email" class="form-control" id="floatingEmail" placeholder="name@example.com" required>
+                        <label for="floatingEmail">Email address</label>
+                      </div>
+                      <div class="form-floating">
+                        <input type="password" class="form-control" id="floatingPassword" placeholder="Password" required>
+                        <label for="floatingPassword">Password</label>
+                      </div>
+                      <button class="w-100 btn btn-lg btn-primary" type="submit">Sign Up</button>
+                    </form>
+                    <div id="liveAlertPlaceholder"></div>
+                  </main>
+                  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-kenU1KFdBIe4zVF0s0G1M5b4hcpxyD9F7jL+jjXkk+Q2h455rYXK/7HAuoJl+0I4" crossorigin="anonymous"></script>
+                  <script src="signup.js" type="module"></script>
+                </body>
+              </html>' > /home/ec2-user/workshop/cognito-web/web-app/public/signup.html
+              echo 'import express from "express";
+              import authn from "./authn/app.js";
+              const app = express();
+              const port = process.env["PORT"] || 8080;
+              app.use(express.json());
+              app.use(express.static("public"));
+              app.use((req, res, next) => {
+                if (req.get("x-forwarded-proto") &&
+                    (req.get("x-forwarded-proto")).split(",")[0] !== "https") {
+                  return res.redirect(301, "https://" + req.get("host"));
+                }
+                req.schema = "https";
+                next();
+              });
+              app.get("/", (req, res) => {
+                res.send("Amazon Cognito Workshop");
+              });
+              app.get("/callback", (req, res) => {
+                res.type("html");
+                res.status(200);
+                res.send(`
+                  <!DOCTYPE html><html><body onload="zFunc()"><script>
+                  function zFunc() { if (window.location.hash.length > 0) window.location.replace(window.location.href.replace("#", "?")); }
+                  </script><pre style="background-color:#C0C0C0;padding:1em;white-space:pre-wrap;overflow-wrap:break-word"><code>` + JSON.stringify(req.query, null, 2) + `</code></pre></body></html>
+                `);
+              });
+              app.use("/authn", authn);
+              app.listen(port);' > /home/ec2-user/workshop/cognito-web/web-app/app.js
+              echo '{
+                "name": "cognito-ws-be",
+                "version": "1.0.0",
+                "description": "Amazon Cognito Workshop Backend",
+                "main": "app.js",
+                "type": "module",
+                "license": "MIT",
+                "dependencies": {
+                  "express": "^5.1.0",
+                  "base64-arraybuffer": "^1.0.2",
+                  "fido2-lib": "^3.5.3"
+                }
+              }' > /home/ec2-user/workshop/cognito-web/web-app/package.json
+              echo '#!/bin/bash
+              node app.js' > /home/ec2-user/workshop/cognito-web/web-app/run.sh
+              mkdir -p /home/ec2-user/workshop/cognito-web/web-ui-js
+              echo 'const POOL_DATA = {
+                UserPoolId: "${!WS_USER_POOL_ID}",
+                IdentityPoolId: "${!WS_IDENTITY_POOL_ID}",
+                ClientId: "${!WS_USER_POOL_CLIENT_ID}",
+                Region: "${!WS_REGION}",
+                ServiceEndpoint: "https://${!WS_MOCK_API_ID}.execute-api.${!WS_REGION}.amazonaws.com/Prod/pets"
+              };
+              export { POOL_DATA }' > /home/ec2-user/workshop/cognito-web/web-ui-js/cognito-env-tmpl.js
+              echo '' > /home/ec2-user/workshop/cognito-web/web-ui-js/cognito-env.js
+              echo '' > /home/ec2-user/workshop/cognito-web/web-ui-js/cognito-sdk.js
+              echo '' > /home/ec2-user/workshop/cognito-web/web-ui-js/helpers.js
+              echo '' > /home/ec2-user/workshop/cognito-web/web-ui-js/signin.js
+              echo '' > /home/ec2-user/workshop/cognito-web/web-ui-js/signup.js
+              echo '{
+                "name": "cognito-ws-fe",
+                "version": "1.0.0",
+                "description": "Amazon Cognito Workshop Front-End",
+                "main": "app.js",
+                "type": "module",
+                "license": "MIT",
+                "dependencies": {
+                  "@aws-sdk/client-s3": "^3.787.0",
+                  "@aws-sdk/credential-providers": "^3.787.0",
+                  "amazon-cognito-identity-js": "^6.3.15",
+                  "axios": "^1.8.4",
+                  "base64-arraybuffer": "^1.0.2",
+                  "qrcode": "^1.5.4"
+                }
+              }' > /home/ec2-user/workshop/cognito-web/web-ui-js/package.json
+              echo 'AWSTemplateFormatVersion: "2010-09-09"
+              Transform: AWS::Serverless-2016-10-31
+              Description: >
+                cognito-webapp
+                Amazon Cognito Workshop
+              Resources:
+                CognitoWebApp:
+                  Type: AWS::Serverless::Function
+                  Properties:
+                    FunctionName: !Sub ${!AWS::StackName}-CognitoWebApp
+                    CodeUri: web-app/
+                    Handler: run.sh
+                    Runtime: nodejs22.x
+                    MemorySize: 1024
+                    Timeout: 3
+                    Architectures:
+                      - x86_64
+                    Environment:
+                      Variables:
+                        AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+                        RUST_LOG: info
+                    Layers:
+                      - !Sub arn:aws:lambda:${!AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:17
+                    Events:
+                      RootPath:
+                        Type: Api
+                        Properties:
+                          Path: /
+                          Method: ANY
+                      AnyPath:
+                        Type: Api
+                        Properties:
+                          Path: /{proxy+}
+                          Method: ANY
+              Outputs:
+                CognitoWebAppURL:
+                  Description: "Cognito Workshop Web App URL"
+                  Value: !Sub "https://${!ServerlessRestApi}.execute-api.${!AWS::Region}.${!AWS::URLSuffix}/Prod/callback/"
+                  Export:
+                    Name: !Sub ${!AWS::StackName}-CallbackUrl
+              ' > /home/ec2-user/workshop/cognito-web/template.yaml
+              chown -R ec2-user:ec2-user /home/ec2-user/workshop/
+
+              su - ec2-user << 'EOF'
+              cd /home/ec2-user/workshop/cognito-web/web-app
+              npm install
+              cd /home/ec2-user/workshop/cognito-web/web-ui-js
+              npm install
+              cd /home/ec2-user/workshop/cognito-web
+              sam build
+              sam deploy --region ${AWS::Region} --stack-name cognito-webapp --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --resolve-s3 --no-confirm-changeset --disable-rollback --save-params
+              EOF
+
+Outputs:  
+  VsCode:
+    Description: Public IP Address of the VS Code Server EC2 instance
+    Value: !Sub http://${VsCodeEc2.PublicIp}:8000
+  VsCodeEc2InstanceId:
+    Description: EC2 Instance ID of the VS Code Server
+    Value: !Ref VsCodeEc2
+    Export:
+      Name: !Sub ${AWS::StackName}-InstanceId
