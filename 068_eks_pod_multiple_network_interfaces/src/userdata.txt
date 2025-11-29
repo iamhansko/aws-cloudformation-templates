@@ -1,0 +1,172 @@
+Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+MIME-Version: 1.0
+
+--==BOUNDARY==
+Content-Type: text/x-shellscript; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment; filename="userdata.txt"
+
+#!/bin/bash
+set -o xtrace
+# List your multus Subnets and Security Group
+subnetids="subnet-0fbc32911ef1ccf06,subnet-006a739d4def07a34"
+secgrpids="sg-063ba9c1e97cad629,sg-0f220075b89c61799"
+IFS=',' read -ra subnetList <<< "$subnetids"
+IFS=',' read -ra secGrpList <<< "$secgrpids"
+subnetListLen=${#subnetList[@]}
+secGrpListLen=${#secGrpList[@]}
+
+# If just one security group is defined, then use it for every subnet
+if [ $subnetListLen != $secGrpListLen ]; then
+    x=0
+    for subnet in "${subnetList[@]}";
+    do
+        secGrpList[${x}]="${secGrpList[0]}"
+        x=$((x+1))
+    done
+fi 
+
+### Get Instance ID
+TOKEN=`curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"`
+instanceId=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+# create and attach multus interfaces as requested
+n=0
+for subnetId in "${subnetList[@]}";
+do
+    secGrpId="${secGrpList[n]}" 
+
+    ### Get ipv6 cidr if any
+    subnetipv6=`aws ec2 describe-subnets --subnet-ids ${subnetId}\
+    --query "Subnets[*].Ipv6CidrBlockAssociationSet[*].Ipv6CidrBlock" --output text`
+    ### Create and attach interfaces, multus subnets and security groups are identified using tag Name:Value, 
+    ### checks if subnet has IPV6 if true provisioned ENI with IPv6 else only IPv4
+    if [ -n "$subnetipv6" ]; then
+        multusId=$(aws ec2 create-network-interface --subnet-id ${subnetId} \
+        --description "VRF$((n+1))" --groups ${secGrpId} --ipv6-address-count 1 \
+        --tag-specifications "ResourceType="network-interface",\
+        Tags=[{Key="node.k8s.amazonaws.com/no_manage",Value="true"}]" | jq -r '.NetworkInterface.NetworkInterfaceId');
+    else
+        multusId=$(aws ec2 create-network-interface --subnet-id ${subnetId} \
+        --description "VRF$((n+1))" --groups ${secGrpId} \
+        --tag-specifications "ResourceType="network-interface",\
+        Tags=[{Key="node.k8s.amazonaws.com/no_manage",Value="true"}]" | jq -r '.NetworkInterface.NetworkInterfaceId');
+    fi
+    ### Attach the multus interface to EC2 worker, adjust device-index incrementally for every new attachment
+    attachmentResult=$(aws ec2 attach-network-interface --network-interface-id ${multusId} \
+    --instance-id $instanceId \
+    --output text --device-index $((n+1 )) )
+    # IFS=' ' read -ra attachmentId <<< "$attachmentResult"
+    attachmentId=$(echo "$attachmentResult" | awk '{print $1}')
+    echo $attachmentId
+    aws ec2 modify-network-interface-attribute --network-interface-id ${multusId} --no-source-dest-check
+    aws ec2 modify-network-interface-attribute --attachment AttachmentId=${attachmentId},DeleteOnTermination=True \
+    --network-interface-id ${multusId}
+    n=$((n+1))
+done
+
+# Enable rc.local service
+cat << EOF > /etc/systemd/system/rc-local.service
+[Unit]
+ Description=/etc/rc.local Compatibility
+ ConditionPathExists=/etc/rc.local
+
+[Service]
+ Type=forking
+ ExecStart=/etc/rc.local start
+ TimeoutSec=0
+ StandardOutput=tty
+ RemainAfterExit=yes
+ SysVStartPriority=99
+
+[Install]
+ WantedBy=multi-user.target
+EOF
+
+modprobe sctp                                 
+touch /etc/rc.local
+chmod +x /etc/rc.local
+echo "#!/bin/bash" >> /etc/rc.local
+echo "sleep 10" >> /etc/rc.local
+
+## Setting Multus interface for kernel
+echo "net.ipv4.conf.default.rp_filter = 0" | tee -a /etc/sysctl.conf
+echo "net.ipv4.conf.all.rp_filter = 0" | tee -a /etc/sysctl.conf
+sudo sysctl -p
+ls /sys/class/net/ > /tmp/ethList;cat /tmp/ethList |while read line ; do sudo ifconfig $line up; done
+grep ens /tmp/ethList |while read line ; do echo "ifconfig $line up" >> /etc/rc.local; done              
+
+# Samsung requested this for OVS routing
+cat << EOF > /etc/systemd/network/10-static.network
+[Match]
+Name=ens6
+
+[Network]
+DHCP=yes
+
+[DHCP]
+UseRoutes=false
+
+[Route]
+Gateway=10.1.12.65
+Destination=10.1.12.0/26
+EOF
+
+cat << EOF > /etc/systemd/network/11-static.network
+[Match]
+Name=ens7
+
+[Network]
+DHCP=no
+
+[DHCP]
+UseRoutes=false
+EOF
+
+# Restart network.service and rc-local (order asked by Samsung)
+sudo systemctl stop systemd-networkd
+sudo systemctl start systemd-networkd
+sudo systemctl enable rc-local
+sudo systemctl start rc-local
+
+clusterName=mult
+apiServerUrl=$(aws eks describe-cluster --query "cluster.endpoint" --output text --name $clusterName)
+b64ClusterCA=$(aws eks describe-cluster --query "cluster.certificateAuthority.data" --output text --name $clusterName)
+svcSubnet=$(aws eks describe-cluster --query "cluster.kubernetesNetworkConfig.serviceIpv4Cidr" --output text --name $clusterName)
+
+cat <<EOF > /etc/node-config.yaml
+apiVersion: node.eks.aws/v1alpha1
+kind: NodeConfig
+spec:
+  cluster:
+    apiServerEndpoint: ${apiServerUrl}
+    certificateAuthority: ${b64ClusterCA}
+    cidr: ${svcSubnet}
+    name: ${clusterName}
+  kubelet:
+    flags:
+EOF
+
+argues="--node-labels=lb=true,udr=true,pcf=true,ovs=true"
+formatted_argues=$(echo "$argues" | sed 's/, /|/g')
+IFS='|' read -ra argueList <<< "$formatted_argues"
+argueListLen=${#argueList[@]}
+n=0
+for argue in "${argueList[@]}";
+do
+cat <<EOF >> /etc/node-config.yaml
+      - "${argueList[n]}"
+EOF
+n=$((n+1))
+done
+
+cat << EOF > /var/lib/cloud/scripts/per-boot/node-join.sh
+#!/bin/bash
+/usr/bin/nodeadm init -c file:///etc/node-config.yaml
+EOF
+
+chmod +x /var/lib/cloud/scripts/per-boot/node-join.sh
+/var/lib/cloud/scripts/per-boot/node-join.sh 
+
+--==BOUNDARY==--

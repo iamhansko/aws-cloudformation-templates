@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-homed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: multi-homed
+  template:
+    metadata:
+      annotations:
+        k8s.amazonaws.com/nicConfig: multi-nic-attachment
+      labels:
+        app: multi-homed
+    spec:
+      containers:
+        - name: dnsutils
+          image: registry.k8s.io/e2e-test-images/agnhost:2.39
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
