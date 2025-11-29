@@ -86,6 +86,8 @@ Resources:
       VpcId: !Ref Vpc
   PublicSubnetRoute:
     Type: AWS::EC2::Route
+    DependsOn: 
+      - VpcInternetGatewayAttachment
     Properties:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
@@ -104,7 +106,7 @@ Resources:
           Tags:
             - Key: Name
               Value: !Sub private-subnet-${Az}
-      Natgateway${Az}ElasticIp:
+      NatgatewayElasticIp${Az}:
         Type: AWS::EC2::EIP
       PrivateSubnet${Az}RouteTableAssociation:
         Type: AWS::EC2::SubnetRouteTableAssociation
@@ -127,15 +129,18 @@ Resources:
       RouteTableId: !Ref PrivateSubnetRouteTable
   NatGateway:
     Type: AWS::EC2::NatGateway
+    DependsOn: 
+      - VpcInternetGatewayAttachment
     Properties:
+      VpcId: !Ref Vpc
       AvailabilityMode: regional
       AvailabilityZoneAddresses:
         - AvailabilityZone: !Sub ${AWS::Region}a
           AllocationIds: 
-            - !Ref NatgatewayaElasticIp
+            - !GetAtt NatgatewayElasticIpa.AllocationId
         - AvailabilityZone: !Sub ${AWS::Region}c
           AllocationIds: 
-            - !Ref NatgatewaycElasticIp
+            - !GetAtt NatgatewayElasticIpc.AllocationId
       Tags: 
         - Key : Name
           Value : !Sub regional-natgw
