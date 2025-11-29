@@ -273,6 +273,19 @@ Resources:
                 hostPath:
                   path: /home/user/.musicgpt
                   type: DirectoryOrCreate" > /home/ec2-user/manifests/musicgpt.yaml
+          echo "apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: nvdp-config
+            namespace: kube-system
+          data:
+            time-slicing.conf: |
+              version: v1
+              sharing:
+                timeSlicing:
+                  resources:
+                    - name: nvidia.com/gpu
+                      replicas: 4" > /home/ec2-user/manifests/nvdp_configmap.yaml
 
           aws eks update-kubeconfig --region ${AWS::Region} --name ${NvidiaCluster} --alias nvidia
           helm repo add eks https://aws.github.io/eks-charts
@@ -300,9 +313,17 @@ Resources:
           sleep 60
           helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
           helm repo update nvdp
-          helm install nvdp nvdp/nvidia-device-plugin --namespace kube-system --create-namespace --set gfd.enabled=true --wait
+          helm install nvdp nvdp/nvidia-device-plugin --namespace kube-system --create-namespace --set gfd.enabled=true --set config.name=nvdp-config --wait
           kubectl apply -f /home/ec2-user/manifests/nvidia_smi.yaml
           kubectl apply -f /home/ec2-user/manifests/musicgpt.yaml
+          kubectl apply -f /home/ec2-user/manifests/nvdp_configmap.yaml
+
+          echo "# Nvidia Device Plugin
+          
+          helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
+          helm repo update nvdp
+          helm upgrade --install nvdp nvdp/nvidia-device-plugin --namespace kube-system --create-namespace --set gfd.enabled=true --set config.name=nvdp-config --wait
+          " > /home/ec2-user/README.md
 
           EOF
 
@@ -519,9 +540,9 @@ Resources:
           ForceUpdateEnabled: true
           NodeRole: !GetAtt EksNodeIamRole.Arn
           ScalingConfig: 
-            DesiredSize: 1
-            MaxSize: 3
-            MinSize: 1
+            DesiredSize: 2
+            MaxSize: 6
+            MinSize: 2
           Subnets: 
             - !Ref PrivateSubneta
             - !Ref PrivateSubnetc
