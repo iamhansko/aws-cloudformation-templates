@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: musicgpt
+spec:
+  containers:
+    - name: musicgpt
+      image: gabotechs/musicgpt
+      args:
+        - --ui-expose
+        - --gpu
+      ports:
+        - containerPort: 8642
+      volumeMounts:
+        - name: host-volume
+          mountPath: /root/.local/share/musicgpt
+      resources:
+        requests:
+          nvidia.com/gpu: 1
+        limits:
+          nvidia.com/gpu: 1
+  volumes:
+    - name: host-volume
+      hostPath:
+        path: /home/user/.musicgpt
+        type: DirectoryOrCreate

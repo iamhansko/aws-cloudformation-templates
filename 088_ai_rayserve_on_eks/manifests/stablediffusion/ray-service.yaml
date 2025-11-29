@@ -18,7 +18,7 @@ spec:
         route_prefix: "/"
         runtime_env:
           env_vars:
-            MODEL_ID: "stabilityai/stable-diffusion-2-1"
+            MODEL_ID: "sd2-community/stable-diffusion-2-1"
           pip:
             - transformers==4.25.1
         deployments:
