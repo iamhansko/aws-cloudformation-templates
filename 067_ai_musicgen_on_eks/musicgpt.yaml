@@ -64,7 +64,7 @@ Resources:
         Type: AWS::EC2::SubnetRouteTableAssociation
         Properties:
           RouteTableId: !Ref PublicSubnetRouteTable
-          SubnetId:
+          SubnetId: 
             Ref: !Sub PublicSubnet${Az}
   PublicSubnetRouteTable:
     Type: AWS::EC2::RouteTable
@@ -109,9 +109,8 @@ Resources:
       PrivateSubnet${Az}RouteTableAssociation:
         Type: AWS::EC2::SubnetRouteTableAssociation
         Properties:
-          RouteTableId:
-            Ref: !Sub PrivateSubnetRouteTable
-          SubnetId: 
+          RouteTableId: !Ref PrivateSubnetRouteTable
+          SubnetId:
             Ref: !Sub PrivateSubnet${Az}
   PrivateSubnetRouteTable:
     Type: AWS::EC2::RouteTable
@@ -120,14 +119,12 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub private-rt
-  PrivateSubnet${Az}Route:
+  PrivateSubnetRoute:
     Type: AWS::EC2::Route
     Properties:
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId:
-        Ref: !Sub NatGateway
-      RouteTableId:
-        Ref: !Sub PrivateSubnetRouteTable
+      NatGatewayId: !Ref NatGateway
+      RouteTableId: !Ref PrivateSubnetRouteTable
   NatGateway:
     Type: AWS::EC2::NatGateway
     Properties:
@@ -161,8 +158,8 @@ Resources:
           DeviceIndex: 0
           SubnetId: !Ref PublicSubneta
           GroupSet: 
-            - !GetAtt PrimaryCluster.ClusterSecurityGroupId
-            - !GetAtt SecondaryCluster.ClusterSecurityGroupId
+            - !GetAtt NvidiaCluster.ClusterSecurityGroupId
+            - !GetAtt NvidiaTimeSlicingCluster.ClusterSecurityGroupId
             - !Ref VsCodeEc2SecurityGroup
       Tags: 
         - Key: Name
@@ -464,7 +461,7 @@ Resources:
             - AccessScope: 
                 Type: cluster
               PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
-          ClusterName: 
+          ClusterName:
             Ref: !Sub ${Prefix}Cluster
           PrincipalArn: !GetAtt VsCodeEc2IamRole.Arn
           Type: STANDARD
@@ -507,8 +504,8 @@ Resources:
       ${Prefix}NodeGroup:
         Type: AWS::EKS::Nodegroup
         Properties:
-          NodegroupName: core-nodegroup
-          AmiType: AL2023_x86_64_STANDARD
+          NodegroupName: gpu-nodegroup
+          AmiType: AL2023_x86_64_NVIDIA 
           InstanceTypes: 
             - g4dn.xlarge
           CapacityType: ON_DEMAND
