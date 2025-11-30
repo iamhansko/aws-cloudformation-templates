@@ -1,5 +1,13 @@
 Transform: AWS::LanguageExtensions
 Parameters:
+  GitHubUser:
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubUser] must not be empty
+  GitHubToken:
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: Parameter [GitHubToken] must not be empty
   InboundFromAnywhere:
     Type: String
     Default: "False"
@@ -250,8 +258,84 @@ Resources:
           kubectl apply -f manifests/ebs_storageclass.yaml
           sleep 10
 
-          echo "# EKS + VPC Lattice" > /home/ec2-user/README.md
+          curl -s https://fluxcd.io/install.sh | sudo bash
+          export GITHUB_TOKEN=${GitHubToken}
+          export GITHUB_USER=${GitHubUser}
+          flux bootstrap github --owner=$GITHUB_USER --repository=flux-infra --personal=true --private=false
+          git clone https://github.com/$GITHUB_USER/flux-infra
+          cd /home/ec2-user/flux-infra
+          flux create source git podinfo \
+          --url=https://github.com/stefanprodan/podinfo \
+          --branch=master \
+          --interval=1m \
+          --export > ./podinfo-source.yaml
+          flux create kustomization podinfo \
+          --target-namespace=default \
+          --source=podinfo \
+          --path="./kustomize" \
+          --prune=true --wait=true \
+          --interval=5m \
+          --retry-interval=2m \
+          --health-check-timeout=3m \
+          --export > ./podinfo-kustomization.yaml
+          git add -A && git commit -m "infra: podinfo GitRepository and Kustomization" && git push
 
+          echo '# Flux on EKS
+          
+          ## Flux Bootstrap
+          ```
+          curl -s https://fluxcd.io/install.sh | sudo bash
+          export GITHUB_TOKEN=${GitHubToken}
+          export GITHUB_USER=${GitHubUser}
+          flux bootstrap github --owner=$GITHUB_USER --repository=flux-infra --personal=true --private=false
+          git clone https://github.com/$GITHUB_USER/flux-infra
+          cd /home/ec2-user/flux-infra
+          ```
+          
+          ## Flux Source
+          ```
+          flux create source git podinfo \
+          --url=https://github.com/stefanprodan/podinfo \
+          --branch=master \
+          --interval=1m \
+          --export > ./podinfo-source.yaml
+          ```
+          
+          ## Flux Kustomization
+          ```
+          flux create kustomization podinfo \
+          --target-namespace=default \
+          --source=podinfo \
+          --path="./kustomize" \
+          --prune=true --wait=true \
+          --interval=5m \
+          --retry-interval=2m \
+          --health-check-timeout=3m \
+          --export > ./podinfo-kustomization.yaml
+          ```
+          
+          ## GitHub Commit & Push
+          ```
+          git add -A && git commit -m "infra: podinfo GitRepository and Kustomization" && git push
+          flux get kustomizations --watch
+          kubectl get pod --watch
+          
+          echo "  patches:
+              - patch: |-
+                  apiVersion: autoscaling/v2
+                  kind: HorizontalPodAutoscaler
+                  metadata:
+                    name: podinfo
+                  spec:
+                    minReplicas: 4
+                target:
+                  name: podinfo
+                  kind: HorizontalPodAutoscaler" >> ./podinfo-kustomization.yaml
+          git add -A && git commit -m "infra: Increase podinfo Minimum Replicas" && git push
+          flux get kustomizations --watch
+          kubectl get pod --watch
+          ```' > /home/ec2-user/README.md
+          
           EOF
 
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
