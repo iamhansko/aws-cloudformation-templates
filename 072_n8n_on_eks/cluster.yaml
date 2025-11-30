@@ -253,13 +253,53 @@ Resources:
           cd /home/ec2-user
           git clone https://github.com/n8n-io/n8n-hosting.git
           cd n8n-hosting/kubernetes
-          kubectl apply -f .
+          echo 'apiVersion: v1
+          kind: Service
+          metadata:
+            labels:
+              service: n8n
+            name: n8n
+            namespace: n8n
+            annotations:
+              service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+              service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+              service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: stickiness.enabled=true,stickiness.type=source_ip
+              service.beta.kubernetes.io/aws-load-balancer-security-groups: ${NlbSecurityGroup}
+              service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+          spec:
+            type: LoadBalancer
+            ports:
+              - name: "5678"
+                port: 5678
+                targetPort: 5678
+                protocol: TCP
+            selector:
+              service: n8n' > /home/ec2-user/n8n-hosting/kubernetes/n8n-service.yaml
+          kubectl create namespace n8n
+          kubectl apply -f /home/ec2-user/n8n-hosting/kubernetes
+          kubectl -n n8n set image deployment n8n n8n=n8nio/n8n:1.120.4
+          kubectl -n n8n set env deployment n8n -c n8n N8N_SECURE_COOKIE=false
 
           echo "# n8n on EKS" > /home/ec2-user/README.md
 
           EOF
 
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  NlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: Security Group
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 5678,
+          "ToPort": 5678,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: nlb-sg
   VsCodeEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
