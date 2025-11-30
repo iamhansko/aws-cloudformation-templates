@@ -277,7 +277,7 @@ Resources:
               service: n8n' > /home/ec2-user/n8n-hosting/kubernetes/n8n-service.yaml
           kubectl create namespace n8n
           kubectl apply -f /home/ec2-user/n8n-hosting/kubernetes
-          kubectl -n n8n set image deployment n8n n8n=n8nio/n8n:1.120.4
+          kubectl -n n8n set image deployment n8n n8n=n8nio/n8n:1.119.2
           kubectl -n n8n set env deployment n8n -c n8n N8N_SECURE_COOKIE=false
 
           echo "# n8n on EKS" > /home/ec2-user/README.md
