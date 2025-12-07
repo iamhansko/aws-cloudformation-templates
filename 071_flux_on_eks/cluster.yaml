@@ -278,7 +278,8 @@ Resources:
           --retry-interval=2m \
           --health-check-timeout=3m \
           --export > ./podinfo-kustomization.yaml
-          git add -A && git commit -m "infra: podinfo GitRepository and Kustomization" && git push
+          git add -A && git commit -m "infra: podinfo GitRepository and Kustomization"
+          git push
 
           echo '# Flux on EKS
           
@@ -316,7 +317,8 @@ Resources:
           
           ## GitHub Commit & Push
           ```
-          git add -A && git commit -m "infra: podinfo GitRepository and Kustomization" && git push
+          git add -A && git commit -m "infra: podinfo GitRepository and Kustomization"
+          git push
           flux get kustomizations --watch
           kubectl get pod --watch
           
@@ -465,7 +467,7 @@ Resources:
       AmiType: AL2023_x86_64_STANDARD
       InstanceTypes:
         # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-eni.html#network-cards
-        - c6in.32xlarge	
+        - t3.large
       CapacityType: ON_DEMAND
       ClusterName: !Ref EksCluster
       ForceUpdateEnabled: true

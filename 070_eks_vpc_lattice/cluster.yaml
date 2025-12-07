@@ -8,8 +8,8 @@ Parameters:
   KubernetesVersion:
     Description: EKS Cluster Kubernetes Version (1.XX)
     Type: String
-    Default: "1.34"
-    AllowedValues: ["1.32", "1.33", "1.34"]
+    Default: "1.32"
+    AllowedValues: ["1.32"]
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
@@ -250,7 +250,256 @@ Resources:
           kubectl apply -f manifests/ebs_storageclass.yaml
           sleep 10
 
-          echo "# EKS + VPC Lattice" > /home/ec2-user/README.md
+          export AWS_REGION=${AWS::Region}
+          export AWS_ACCOUNT_ID=${AWS::AccountId}
+          export EKS_CLUSTER_NAME=${EksCluster}
+          export EKS_CLUSTER_VPC=${Vpc}
+          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+          aws ecr-public get-login-password --region us-east-1 | helm registry login --username AWS --password-stdin public.ecr.aws
+          helm upgrade --install gateway-api-controller oci://public.ecr.aws/aws-application-networking-k8s/aws-gateway-controller-chart \
+          --version=v1.1.5 \
+          --namespace aws-application-networking-system --create-namespace \
+          --set awsRegion=$AWS_REGION \
+          --set awsAccountId=$AWS_ACCOUNT_ID \
+          --set clusterName=$EKS_CLUSTER_NAME \
+          --set clusterVpcId=$EKS_CLUSTER_VPC \
+          --set webhookEnabled=false \
+          --set=defaultServiceNetwork=eks-network \
+          --wait
+
+          echo '# EKS + VPC Lattice
+          
+          ## AWS Gateway API Controller Installation
+          ```
+          export AWS_REGION=${AWS::Region}
+          export AWS_ACCOUNT_ID=${AWS::AccountId}
+          export EKS_CLUSTER_NAME=${EksCluster}
+          export EKS_CLUSTER_VPC=${Vpc}
+          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+          aws ecr-public get-login-password --region us-east-1 | helm registry login --username AWS --password-stdin public.ecr.aws
+          helm upgrade --install gateway-api-controller oci://public.ecr.aws/aws-application-networking-k8s/aws-gateway-controller-chart \
+          --version=v1.1.5 \
+          --namespace aws-application-networking-system --create-namespace \
+          --set awsRegion=$AWS_REGION \
+          --set awsAccountId=$AWS_ACCOUNT_ID \
+          --set clusterName=$EKS_CLUSTER_NAME \
+          --set clusterVpcId=$EKS_CLUSTER_VPC \
+          --set webhookEnabled=false \
+          --set=defaultServiceNetwork=eks-network \
+          --wait
+          ```
+
+          ## Create VPC Lattice ServiceNetwork(Gateway) & Services(HttpRoutes)
+          kubectl apply -f /home/ec2-user/manifests/vpc_lattice.yaml
+
+          ## VPC Lattice Test
+          export ratesFQDN=$(kubectl get httproute rates -o json | jq -r ".metadata.annotations.\"application-networking.k8s.aws/lattice-assigned-domain-name\"")
+          export inventoryFQDN=$(kubectl get httproute inventory -o json | jq -r ".metadata.annotations.\"application-networking.k8s.aws/lattice-assigned-domain-name\"")
+          echo -e "$ratesFQDN \n$inventoryFQDN"
+          kubectl exec deploy/inventory-ver1 -- curl -s $ratesFQDN/parking $ratesFQDN/review $inventoryFQDN
+          kubectl exec deploy/parking -- curl -s $ratesFQDN/parking $ratesFQDN/review $inventoryFQDN
+
+          ' > /home/ec2-user/README.md
+
+          echo 'apiVersion: gateway.networking.k8s.io/v1beta1
+          kind: GatewayClass
+          metadata:
+            name: amazon-vpc-lattice
+          spec:
+            controllerName: application-networking.k8s.aws/gateway-api-controller
+          ---
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: Gateway
+          metadata:
+            name: eks-network
+          spec:
+            gatewayClassName: amazon-vpc-lattice
+            listeners:
+            - name: http
+              protocol: HTTP
+              port: 80
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: parking
+            labels:
+              app: parking
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: parking
+            template:
+              metadata:
+                labels:
+                  app: parking
+              spec:
+                containers:
+                - name: parking
+                  image: public.ecr.aws/x2j8p8w7/http-server:latest
+                  env:
+                  - name: PodName
+                    value: "parking handler pod"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: parking
+          spec:
+            selector:
+              app: parking
+            ports:
+              - protocol: TCP
+                port: 80
+                targetPort: 8090
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: review
+            labels:
+              app: review
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: review
+            template:
+              metadata:
+                labels:
+                  app: review
+              spec:
+                containers:
+                - name: aug24-review
+                  image: public.ecr.aws/x2j8p8w7/http-server:latest
+                  env:
+                  - name: PodName
+                    value: "review handler pod"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: review
+          spec:
+            selector:
+              app: review
+            ports:
+              - protocol: TCP
+                port: 80
+                targetPort: 8090
+          ---
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: HTTPRoute
+          metadata:
+            name: rates
+          spec:
+            parentRefs:
+            - name: eks-network
+              sectionName: http
+            rules:
+            - backendRefs:
+              - name: parking
+                kind: Service
+                port: 80
+              matches:
+              - path:
+                  type: PathPrefix
+                  value: /parking
+            - backendRefs:
+              - name: review
+                kind: Service
+                port: 80
+              matches:
+              - path:
+                  type: PathPrefix
+                  value: /review
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: inventory-ver1
+            labels:
+              app: inventory-ver1
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: inventory-ver1
+            template:
+              metadata:
+                labels:
+                  app: inventory-ver1
+              spec:
+                containers:
+                - name: inventory-ver1
+                  image: public.ecr.aws/x2j8p8w7/http-server:latest
+                  env:
+                  - name: PodName
+                    value: "Inventory-ver1 handler pod"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: inventory-ver1
+          spec:
+            selector:
+              app: inventory-ver1
+            ports:
+              - protocol: TCP
+                port: 80
+                targetPort: 8090
+          ---
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: HTTPRoute
+          metadata:
+            name: inventory
+          spec:
+            parentRefs:
+            - name: eks-network
+              sectionName: http
+            rules:
+            - backendRefs:
+              - name: inventory-ver1
+                kind: Service
+                port: 80
+                weight: 10
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: inventory-ver2
+            labels:
+              app: inventory-ver2
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: inventory-ver2
+            template:
+              metadata:
+                labels:
+                  app: inventory-ver2
+              spec:
+                containers:
+                - name: inventory-ver2
+                  image: public.ecr.aws/x2j8p8w7/http-server:latest
+                  env:
+                  - name: PodName
+                    value: "Inventory-ver2 handler pod"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: inventory-ver2
+          spec:
+            selector:
+              app: inventory-ver2
+            ports:
+              - protocol: TCP
+                port: 80
+                targetPort: 8090' > /home/ec2-user/manifests/vpc_lattice.yaml
+          kubectl apply -f /home/ec2-user/manifests/vpc_lattice.yaml
 
           EOF
 
@@ -381,7 +630,7 @@ Resources:
       AmiType: AL2023_x86_64_STANDARD
       InstanceTypes:
         # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-eni.html#network-cards
-        - c6in.32xlarge	
+        - t3.large
       CapacityType: ON_DEMAND
       ClusterName: !Ref EksCluster
       ForceUpdateEnabled: true
@@ -481,6 +730,65 @@ Resources:
               - sts:TagSession
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+  GatewayApiControllerRole:
+    # https://raw.githubusercontent.com/aws/aws-application-networking-k8s/main/files/controller-installation/recommended-inline-policy.json
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: GatewayApiControllerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - vpc-lattice:*
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeTags
+                  - ec2:DescribeSecurityGroups
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:DescribeLogGroups
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - tag:GetResources
+                  - firehose:TagDeliveryStream
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - tag:TagResources
+                  - tag:UntagResources
+                Resource: "*"
+              - Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: arn:aws:iam::*:role/aws-service-role/vpc-lattice.amazonaws.com/AWSServiceRoleForVpcLattice
+                Condition:
+                  StringLike:
+                    iam:AWSServiceName: vpc-lattice.amazonaws.com
+              - Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: arn:aws:iam::*:role/aws-service-role/delivery.logs.amazonaws.com/AWSServiceRoleForLogDelivery
+                Condition:
+                  StringLike:
+                    iam:AWSServiceName: delivery.logs.amazonaws.com
+  GatewayApiControllerRolePodIdentityAssociation:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Ref EksCluster
+      Namespace: aws-application-networking-system
+      RoleArn: !GetAtt GatewayApiControllerRole.Arn
+      ServiceAccount: gateway-api-controller
   VsCodeEc2IamAccessEntry:
     Type: AWS::EKS::AccessEntry
     Properties:
@@ -491,6 +799,77 @@ Resources:
       ClusterName: !Ref EksCluster
       PrincipalArn: !GetAtt VsCodeEc2IamRole.Arn
       Type: STANDARD
+  
+  EksClusterSecurityGroupVpcLatticeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: -1
+      GroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      SourcePrefixListId: !GetAtt VpcLatticePrefixList.PrefixListId
+  EksClusterSecurityGroupVpcLatticeIpv6Ingress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: -1
+      GroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      SourcePrefixListId: !GetAtt VpcLatticeIpv6PrefixList.PrefixListId
+  VpcLatticePrefixList:
+    Type: Custom::ManagedPrefixList
+    Properties:
+      ServiceToken: !GetAtt CustomLambdaFunction.Arn
+      PrefixListName: !Sub com.amazonaws.${AWS::Region}.vpc-lattice
+  VpcLatticeIpv6PrefixList:
+    Type: Custom::ManagedPrefixList
+    Properties:
+      ServiceToken: !GetAtt CustomLambdaFunction.Arn
+      PrefixListName: !Sub com.amazonaws.${AWS::Region}.ipv6.vpc-lattice
+  CustomLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomLambdaIamRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import json
+          
+          def lambda_handler(event, context):
+            print(json.dumps(event))            
+            try:
+              if event["RequestType"] == "Delete":
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                return
+              ec2 = boto3.client("ec2")
+              prefix_list_name = event["ResourceProperties"]["PrefixListName"]
+              prefix_list_data = ec2.describe_managed_prefix_lists(Filters=[{"Name":"prefix-list-name","Values":[prefix_list_name]}])
+              prefix_list_id = prefix_list_data["PrefixLists"][0]["PrefixListId"]
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {"PrefixListId": prefix_list_id})
+            except Exception as error:
+              print(f"Error: {str(e)}")
+              cfnresponse.send(event, context, cfnresponse.FAILED, {}, reason=str(error))
+  CustomLambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaFunctionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeManagedPrefixLists
+                Resource: "*"
 
 Outputs:
   VsCode:

@@ -287,6 +287,8 @@ Resources:
           docker build -t "${ImageGenerationRepository.RepositoryUri}:latest" ./item-images
           docker push "${ImageGenerationRepository.RepositoryUri}:latest"
 
+          aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com || true
+
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
   VsCodeEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -621,6 +623,8 @@ Resources:
 
   EcsCluster:
     Type: AWS::ECS::Cluster
+    DependsOn:
+      - VsCodeEc2
     Properties:
       CapacityProviders:
         - FARGATE

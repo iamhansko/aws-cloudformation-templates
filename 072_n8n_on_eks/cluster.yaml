@@ -426,7 +426,7 @@ Resources:
       AmiType: AL2023_x86_64_STANDARD
       InstanceTypes:
         # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-eni.html#network-cards
-        - c6in.32xlarge	
+        - t3.large
       CapacityType: ON_DEMAND
       ClusterName: !Ref EksCluster
       ForceUpdateEnabled: true
