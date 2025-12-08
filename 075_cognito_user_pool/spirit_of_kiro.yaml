@@ -192,10 +192,6 @@ Resources:
     Type: AWS::ECR::Repository
     Properties:
       EmptyOnDelete: True
-  ClientRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      EmptyOnDelete: True
   ImageGenerationRepository:
     Type: AWS::ECR::Repository
     Properties:
@@ -288,6 +284,7 @@ Resources:
           docker push "${ImageGenerationRepository.RepositoryUri}:latest"
 
           aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com || true
+          aws bedrock list-foundation-models --query "modelSummaries[*].modelId" > /home/ec2-user/bedrock_models.txt
 
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
   VsCodeEc2SecurityGroup:
@@ -757,7 +754,6 @@ Resources:
                   - ecr:BatchGetImage
                 Resource: 
                   - !GetAtt ServerRepository.Arn
-                  - !GetAtt ClientRepository.Arn
                   - !GetAtt ImageGenerationRepository.Arn
               - Effect: Allow
                 Action:
@@ -792,7 +788,6 @@ Resources:
                   - dynamodb:Scan
                   - dynamodb:BatchGetItem
                   - dynamodb:BatchWriteItem
-                  - dynamodb:TransactWriteItems
                 Resource:
                   - !GetAtt ItemsTable.Arn
                   - !GetAtt InventoryTable.Arn

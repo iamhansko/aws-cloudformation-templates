@@ -21,7 +21,11 @@ Resources:
       DeletionProtection: INACTIVE
       EmailConfiguration:
         EmailSendingAccount: COGNITO_DEFAULT
-      MfaConfiguration: "OFF"
+      MfaConfiguration: OPTIONAL
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+        # - SMS_MFA
+        # - EMAIL_OTP
       Policies:
         PasswordPolicy:
           MinimumLength: 8
@@ -207,8 +211,10 @@ Resources:
         - ALLOW_USER_SRP_AUTH
       SupportedIdentityProviders:
         - COGNITO
-      CallbackURLs:
-        - !ImportValue cognito-webapp-CallbackUrl
+      CallbackURLs: 
+        - !Sub
+            - ${Url}/callback
+            - Url: !ImportValue cognito-webapp-Url
       AllowedOAuthFlows:
         - code
         - implicit
@@ -245,7 +251,7 @@ Resources:
           # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
           - !Sub |
               su - ec2-user << 'EOF'
-              export WS_CALLBACK_URL=$(aws cloudformation describe-stacks --stack-name cognito-webapp --output text --query "Stacks[].Outputs[0].OutputValue")
+              export WS_CALLBACK_URL="$(aws cloudformation describe-stacks --stack-name cognito-webapp --output text --query "Stacks[].Outputs[0].OutputValue")/callback"
               # export WS_USER_POOL_ID=$(aws cognito-idp list-user-pools --max-results 20 --query 'UserPools[?Name==`BuilderClass01`].Id | [0]' --output text)
               # export WS_COGNITO_DOMAIN=$(aws cognito-idp describe-user-pool --user-pool-id $WS_USER_POOL_ID --query 'UserPool.Domain' --output text)
               # export WS_USER_POOL_CLIENT_ID=$(aws cognito-idp list-user-pool-clients --user-pool-id $WS_USER_POOL_ID --query 'UserPoolClients[0].ClientId' --output text)
@@ -255,8 +261,36 @@ Resources:
               export WS_USER_POOL_CLIENT_ID=${CognitoUserPoolClient}
               export WS_USER_POOL_ARN=${CognitoUserPool.Arn}
               export WS_REGION=${AWS::Region}
+              export WS_MOCK_API_ID=${MockApi}
+              export WS_IDENTITY_POOL_ID=${CognitoIdentityPool}
               env | grep ^WS_ | sed -e 's/^/export /' > /home/ec2-user/workshop/ws-env.sh
               chmod +x /home/ec2-user/workshop/ws-env.sh
+
+              source /home/ec2-user/workshop/ws-env.sh
+              
+              cd /home/ec2-user/workshop/cognito-web
+              envsubst "$(printf '${!%s} ' $(env | grep ^WS_ | cut -d'=' -f1))" < /home/ec2-user/workshop/cognito-web/web-ui-js/cognito-env-tmpl.js > /home/ec2-user/workshop/cognito-web/web-ui-js/cognito-env.js
+              esbuild /home/ec2-user/workshop/cognito-web/web-ui-js/cognito-sdk.js --bundle --minify --sourcemap --define:global=window --target=chrome90,firefox90,safari15 > /home/ec2-user/workshop/cognito-web/web-app/public/cognito-sdk.js
+              sam build
+              sam deploy --region ${AWS::Region} --stack-name cognito-webapp
+              # aws cognito-idp set-user-pool-mfa-config --user-pool-id ${CognitoUserPool} --mfa-configuration OPTIONAL --software-token-mfa-configuration Enabled=true
+              # aws cognito-idp update-user-pool --user-pool-id ${CognitoUserPool} --auto-verified-attributes email
+
+              cd /home/ec2-user/workshop/cognito-lambdas
+              sam build
+              sam deploy --stack-name cognito-lambdas --region ${AWS::Region} --capabilities CAPABILITY_AUTO_EXPAND CAPABILITY_IAM CAPABILITY_NAMED_IAM --resolve-s3 --no-confirm-changeset --disable-rollback --save-params --parameter-overrides UserPoolArn=$WS_USER_POOL_ARN
+              export PRE_TOKEN_LAMBDA_ARN=$(aws cloudformation describe-stacks --stack-name cognito-lambdas --query "Stacks[0].Outputs[0].OutputValue")
+              aws cognito-idp update-user-pool --user-pool-id $WS_USER_POOL_ID --lambda-config "{\"PreTokenGenerationConfig\":{\"LambdaVersion\":\"V2_0\",\"LambdaArn\":$PRE_TOKEN_LAMBDA_ARN}}"
+
+              # export IDENTITY_POOL_PROVIDER_NAME=$(aws cognito-identity describe-identity-pool --identity-pool-id $WS_IDENTITY_POOL_ID --query "CognitoIdentityProviders[0].ProviderName" | tr -d '"')
+              # aws cognito-identity set-principal-tag-attribute-map --identity-pool-id $WS_IDENTITY_POOL_ID --identity-provider-name $IDENTITY_POOL_PROVIDER_NAME --principal-tags department=department
+
+              echo "Legal" > /home/ec2-user/legal.txt
+              echo "Engineering" > /home/ec2-user/engineering.txt
+              aws s3 cp /home/ec2-user/legal.txt s3://${S3Bucket}/Legal/legal.txt
+              aws s3 cp /home/ec2-user/engineering.txt s3://${S3Bucket}/Engineering/engineering.txt
+              rm /home/ec2-user/legal.txt
+              rm /home/ec2-user/engineering.txt
               EOF
   
   CognitoDomain:
@@ -588,6 +622,108 @@ Resources:
                 borderColor: 033160ff
                 textColor: 033160ff
 
+  EngineeringGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Engineering
+      UserPoolId: !Ref CognitoUserPool
+  CustomerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Customer
+      UserPoolId: !Ref CognitoUserPool
+
+  CognitoIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: BuilderClass01
+      AllowClassicFlow: false
+      AllowUnauthenticatedIdentities: true
+      CognitoIdentityProviders:
+        - ClientId: !Ref CognitoUserPoolClient
+          ProviderName: !GetAtt CognitoUserPool.ProviderName
+          ServerSideTokenCheck: false
+  
+  CognitoIdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref CognitoIdentityPool
+      Roles: 
+        authenticated: !GetAtt CognitoAuthRole.Arn
+        unauthenticated: !GetAtt CognitoUnauthRole.Arn
+  CognitoAuthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref CognitoIdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: authenticated
+      Policies:
+        - PolicyName: Cognito-authenticated
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - mobileanalytics:PutEvents
+                  - cognito-sync:*
+                  - cognito-identity:*
+                Resource: "*"
+              - Effect: Allow
+                Action: s3:List*
+                Resource: "*"
+  CognitoUnauthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref CognitoIdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: unauthenticated
+      Policies:
+        - PolicyName: Cognito-unauthenticated
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-identity:GetCredentialsForIdentity
+                Resource: "*"
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      CorsConfiguration:
+        CorsRules: 
+          - AllowedHeaders: 
+              - "*"
+            AllowedMethods: 
+              - GET
+              # - PUT
+              # - HEAD
+              # - POST
+              # - DELETE
+            AllowedOrigins: 
+              - "*"
+            ExposedHeaders: []
+
   MockApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
@@ -626,6 +762,33 @@ Resources:
       RestApiId: !Ref MockApi
       ParentId: !GetAtt MockApi.RootResourceId
       PathPart: pets
+  MockApiPetsOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: OPTIONS
+      RestApiId: !Ref MockApi
+      ResourceId: !Ref MockApiPetsResource
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates: 
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters: 
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        TimeoutInMillis: 29000
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels: 
+            application/json: 'Empty'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
   MockApiPetsGetMethod:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -634,32 +797,45 @@ Resources:
       ResourceId: !Ref MockApiPetsResource
       AuthorizationScopes: 
         - petstore/read
+        - Engineering
       AuthorizationType: COGNITO_USER_POOLS
       AuthorizerId: !Ref MockApiAuthorizer
+      RequestParameters: 
+        method.request.querystring.page: false
+        method.request.querystring.type: false
       Integration:
-        Type: MOCK
-        RequestTemplates: 
-          application/json: '{"statusCode": 200}'
+        Type: HTTP
+        IntegrationHttpMethod: GET
+        ConnectionType: INTERNET
+        Uri: http://petstore.execute-api.us-east-1.amazonaws.com/petstore/pets
+        PassthroughBehavior: WHEN_NO_MATCH
         IntegrationResponses: 
           - StatusCode: 200
             ResponseParameters: 
-              method.response.header.Content-Type: '''text/html'''
-            ResponseTemplates: 
-              text/html: <html><body><h1>Welcome to your Pet Store API</h1></body></html>
-        PassthroughBehavior: WHEN_NO_MATCH
+              method.response.header.Access-Control-Allow-Origin: "'*'"
         TimeoutInMillis: 29000
       MethodResponses: 
         - StatusCode: 200
           ResponseParameters: 
-            method.response.header.Content-Type: false
+            method.response.header.Access-Control-Allow-Origin: false
 
 Outputs:
-  CognitoOpenIdConfiguration:
+  00oooAllowEmailAutoVerification:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cognito/v2/idp/user-pools/${CognitoUserPool}/authentication/sign-up/edit/account-confirmation
+  01oooCognitoOpenIdConfiguration:
     Value: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}/.well-known/openid-configuration
     Description: Check OpenID Configuration
-  CognitoLoginUrl:
+  02oooCognitoLoginUrl:
     Value: !Sub 
-      - https://${CognitoDomain}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${CognitoUserPoolClient}&response_type=token&scope=openid+petstore/read+profile&redirect_uri=${CallbackUrl}
-      - CallbackUrl: !ImportValue cognito-webapp-CallbackUrl
-  TestUrl: # -H "Authorization: Bearer PUT_JWT_HERE"
+      - https://${CognitoDomain}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${CognitoUserPoolClient}&response_type=token&scope=openid+petstore/read+profile&redirect_uri=${Url}/callback
+      - Url: !ImportValue cognito-webapp-Url
+  03oooUi:
+    Value: !Sub 
+      - ${Url}/cognito-sdk.html
+      - Url: !ImportValue cognito-webapp-Url
+  04oooUnauthorizedCommand:
     Value: !Sub curl -X GET https://${MockApi}.execute-api.${AWS::Region}.amazonaws.com/${MockApiStage}/pets
+  05oooAuthorizedCommand: # -H "Authorization: Bearer PUT_YOUR_ACCESS_TOKEN_HERE"
+    Value: !Sub 'curl -X GET https://${MockApi}.execute-api.${AWS::Region}.amazonaws.com/${MockApiStage}/pets -H "Authorization: Bearer PUT_YOUR_ACCESS_TOKEN_HERE"'
+  06oooS3BucketName:
+    Value: !Ref S3Bucket
