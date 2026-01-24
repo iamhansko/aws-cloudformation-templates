@@ -1,334 +1,132 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: A/B Testing Environment - Windows and Linux EC2 instances with Kiro IDE
-
+Transform: AWS::LanguageExtensions
 Parameters:
-  # Existing parameters (preserved for Workshop Studio compatibility)
-  KiroKeyPair:
-    Description: SSH Keypair name
-    Default: ws-default-keypair
+  Username:
     Type: String
-
-  VpcCidrBlock:
-    Description: The CIDR block for the VPC
-    Type: String
-    Default: 172.30.0.0/16
-
-  PublicSubnetCidrBlock:
-    Description: The CIDR block for the public subnet
-    Type: String
-    Default: 172.30.1.0/24
-
-  InstanceType:
-    Description: EC2 instance type for the server
-    Type: String
-    Default: m5.large
-
+    Default: kiro
   GitCloneUrl:
-    Description: Git repository URL to clone (must start with https://)
     Type: String
-    Default: https://github.com/binchoo/spirit-of-kiro.git
-    AllowedPattern: ^https://.*
-    ConstraintDescription: Must be a valid HTTPS URL
-
+    Default: https://github.com/iamhansko/spirit-of-kiro.git
   GitCloneBranch:
-    Description: Git branch to checkout
     Type: String
-    Default: main
-  
-  AmiLanguage:
-    Description: Windows Language Setting
+    Default: challenge
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-windows-latest/Windows_Server-2025-Korean-Full-Base
-    # English : /aws/service/ami-windows-latest/Windows_Server-2025-English-Full-Base
-    # French : /aws/service/ami-windows-latest/Windows_Server-2025-French-Full-Base
-    # Japanese : /aws/service/ami-windows-latest/Windows_Server-2025-Japanese-Full-Base # Japanese
-    # Korean : /aws/service/ami-windows-latest/Windows_Server-2025-Korean-Full-Base
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
 
 Resources:
-  # Workshop User Password Secret
-  WorkshopUserPassword:
-    Type: AWS::SecretsManager::Secret
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
+  KeyPair:
+    Type: AWS::EC2::KeyPair
     Properties:
-      Name: !Sub ${AWS::StackName}-workshop-user-password
-      Description: Auto-generated password for workshop user
-      GenerateSecretString:
-        SecretStringTemplate: '{"username": "workshop"}'
-        GenerateStringKey: password
-        PasswordLength: 20
-        ExcludeCharacters: '"@/\'
-        RequireEachIncludedType: true
-        IncludeSpace: false
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-workshop-password
-        - Key: Purpose
-          Value: Workshop User Authentication
-
-  # Lambda role for accessing the secret
-  SecretPlaintextLambdaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: !Sub lambda.${AWS::URLSuffix}
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: AwsSecretsManagerPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                Resource: "*"
-
-  # Lambda function to retrieve the secret value
-  SecretPlaintextLambda:
-    Type: AWS::Lambda::Function
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W58
-            reason: The role associated with the Lambda function has the
-              AWSLambdaBasicExecutionRole managed policy attached
-          - id: W89
-            reason: CloudFormation custom function does not need the scaffolding of a VPC
-          - id: W92
-            reason: CloudFormation custom function does not need reserved concurrent
-              executions
-    Properties:
-      Description: Return the value of the secret
-      Handler: index.lambda_handler
-      Runtime: python3.9
-      MemorySize: 128
-      Timeout: 30
-      Architectures:
-        - arm64
-      Role: !GetAtt SecretPlaintextLambdaRole.Arn
-      Code:
-        ZipFile: |
-          import boto3
-          import json
-          import cfnresponse
-          import logging
-
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-
-          def is_valid_json(json_string):
-              logger.debug(f'Calling is_valid_json: {json_string}')
-              try:
-                  json.loads(json_string)
-                  logger.info('Secret is in json format')
-                  return True
-              except json.JSONDecodeError:
-                  logger.info('Secret is in string format')
-                  return False
-
-          def lambda_handler(event, context):
-              logger.debug(f'event: {event}')
-              logger.debug(f'context: {context}')
-              try:
-                  if event['RequestType'] == 'Delete':
-                      cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
-                  else:
-                      resource_properties = event['ResourceProperties']
-                      secret_name = resource_properties['SecretArn']
-                      secrets_mgr = boto3.client('secretsmanager')
-                      logger.info(f'Getting secret from {secret_name}')
-                      secret = secrets_mgr.get_secret_value(SecretId=secret_name)
-                      logger.debug(f'secret: {secret}')
-                      secret_value = secret['SecretString']
-
-                      responseData = {}
-                      if is_valid_json(secret_value):
-                          secret_json = json.loads(secret_value)
-                          responseData = secret_json
-                      else:
-                          responseData = {'secret': secret_value}
-
-                      logger.debug(f'responseData: {responseData}')
-                      logger.debug(f'type(responseData): {type(responseData)}')
-                      cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData=responseData, reason='OK', noEcho=True)
-              except Exception as e:
-                  logger.error(e)
-                  cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason=str(e))
-
-  # Custom resource to retrieve the plaintext secret
-  SecretPlaintext:
-    Type: Custom::SecretPlaintextLambda
-    Properties:
-      ServiceToken: !GetAtt SecretPlaintextLambda.Arn
-      ServiceTimeout: 15
-      SecretArn: !Ref WorkshopUserPassword
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
   
-  # Custom resource to retrieve the plaintext secret
-  KiroOneTimePassword:
-    Type: Custom::SecretPlaintextLambda
-    DependsOn:
-      - WindowsInstance
-      - KiroSetup
-    Properties:
-      ServiceToken: !GetAtt SecretPlaintextLambda.Arn
-      ServiceTimeout: 15
-      SecretArn: !Sub ${AWS::StackName}-kiro-one-time-password
-
-  # VPC
-  KiroVPC:
+  Vpc:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: !Ref VpcCidrBlock
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
       Tags:
         - Key: Name
-          Value: KiroVPC
+          Value: vpc
 
-  # Internet Gateway
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId: 
+            Ref: !Sub PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
-          Value: KiroInternetGateway
-
-  # VPC Internet Gateway Attach
-  AttachGateway:
+          Value: igw
+  VpcInternetGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
-      VpcId: !Ref KiroVPC
       InternetGatewayId: !Ref InternetGateway
-
-  # Public Subnet
-  PublicSubnet:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref KiroVPC
-      CidrBlock: !Ref PublicSubnetCidrBlock
-      MapPublicIpOnLaunch: true
-      AvailabilityZone: !Select
-        - 0
-        - !GetAZs
-          Ref: AWS::Region
-      Tags:
-        - Key: Name
-          Value: KiroPublicSubnet
-
-  # Public Subnet Route Table
-  RouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref KiroVPC
-      Tags:
-        - Key: Name
-          Value: KiroRouteTable
-
-  # Public Subnet Route Table Association
-  RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PublicSubnet
-      RouteTableId: !Ref RouteTable
-
-  # Public Subnet Route
-  DefaultRoute:
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
     Type: AWS::EC2::Route
+    DependsOn:
+      - VpcInternetGatewayAttachment
     Properties:
-      RouteTableId: !Ref RouteTable
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
-
-  # Windows Remote Desktop (RDP 3389)
-  WindowsSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: KiroWindowsSecurityGroup
-      GroupDescription: Enable RDP port 3389 for Windows instance
-      VpcId: !Ref KiroVPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 3389
-          ToPort: 3389
-          CidrIp: 0.0.0.0/0
-          Description: Allow RDP access from anywhere
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound traffic
-      Tags:
-        - Key: Name
-          Value: KiroWindowsSecurityGroup
-        - Key: Platform
-          Value: Windows
-
-  # IAM Role 
-  KiroInstanceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - ec2.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonCognitoPowerUser
-        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess_v2
-        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
-        - arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess
-        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
-        - arn:aws:iam::aws:policy/AmazonQFullAccess
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-        - arn:aws:iam::aws:policy/AWSSSOMasterAccountAdministrator
-        - arn:aws:iam::aws:policy/PowerUserAccess # Minimize
-      Path: /
-
-  # IAM Profile 
-  KiroProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Path: /
-      Roles:
-        - !Ref KiroInstanceRole
-
-  # Windows EC2 Instance
-  WindowsInstance:
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  WindowsEc2:
     Type: AWS::EC2::Instance
-    DependsOn:
-      - WorkshopUserPassword
-      - SecretPlaintext
     CreationPolicy:
       ResourceSignal:
         Count: '1'                
-        Timeout: PT20M
+        Timeout: PT15M
     Properties:
-      IamInstanceProfile: !Ref KiroProfile
-      InstanceType: !Ref InstanceType
-      ImageId: !Ref AmiLanguage
-      KeyName: !Ref KiroKeyPair
-      NetworkInterfaces:
-        - AssociatePublicIpAddress: true
-          SubnetId: !Ref PublicSubnet
+      ImageId: !Ref AmiId
+      InstanceType: m5.2xlarge
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
           DeviceIndex: 0
-          GroupSet:
-            - !Ref WindowsSecurityGroup
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref WindowsEc2SecurityGroup
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            VolumeSize: 50
             VolumeType: gp3
-            Encrypted: true
-      UserData: !Base64
-        Fn::Sub: |
+            VolumeSize: 100
+            DeleteOnTermination: true
+            Encrypted: false
+      Tags: 
+        - Key: Name
+          Value: windows
+      IamInstanceProfile: !Ref WindowsEc2InstanceProfile
+      UserData: 
+        # C:\Windows\System32\config\systemprofile\AppData\Local\Temp
+        Fn::Base64: !Sub |
           <powershell>
           # Kiro Workshop Windows Setup - Simplified
           $ErrorActionPreference = "Continue"
@@ -358,8 +156,7 @@ Resources:
               Import-Module AWS.Tools.SecretsManager -Force
               Set-DefaultAWSRegion -Region $Region
 
-              $SecretName = "${AWS::StackName}-workshop-user-password"
-              $SecretValue = Get-SECSecretValue -SecretId $SecretName -Region $Region
+              $SecretValue = Get-SECSecretValue -SecretId ${WindowsUserPassword.Id} -Region $Region
               $WorkshopPassword = ($SecretValue.SecretString | ConvertFrom-Json).password
               Write-Log "Password retrieved"
 
@@ -372,16 +169,16 @@ Resources:
 
               # Create workshop user
               Write-Log "Creating workshop user..."
-              Remove-LocalUser -Name "workshop" -ErrorAction SilentlyContinue
+              Remove-LocalUser -Name "${Username}" -ErrorAction SilentlyContinue
               $Password = ConvertTo-SecureString $WorkshopPassword -AsPlainText -Force
-              $User = New-LocalUser -Name "workshop" -Password $Password -FullName "Workshop User" -PasswordNeverExpires -AccountNeverExpires
-              Add-LocalGroupMember -Group "Administrators" -Member "workshop" -ErrorAction SilentlyContinue
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "workshop" -ErrorAction SilentlyContinue
+              $User = New-LocalUser -Name "${Username}" -Password $Password -FullName "Workshop User" -PasswordNeverExpires -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member "${Username}" -ErrorAction SilentlyContinue
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "${Username}" -ErrorAction SilentlyContinue
 
               # Setup directories - Enhanced domain handling
               Write-Log "Finding workshop user profile..."
               $UserProfiles = Get-WmiObject -Class Win32_UserProfile | Where-Object {
-                  $_.LocalPath -like "*workshop*" -and
+                  $_.LocalPath -like "*${Username}*" -and
                   $_.LocalPath -notlike "*.bak" -and
                   $_.LocalPath -notlike "*temp*"
               }
@@ -389,7 +186,7 @@ Resources:
               if ($UserProfiles) {
                   # Find workshop.ComputerName pattern specifically
                   $ComputerName = $env:COMPUTERNAME
-                  $PreferredPattern = "workshop.$ComputerName"
+                  $PreferredPattern = "${Username}.$ComputerName"
 
                   $PreferredProfile = $UserProfiles | Where-Object {$_.LocalPath -like "*$PreferredPattern*" -and $_.LocalPath -notlike "*.000" -and $_.LocalPath -notlike "*.001"}
 
@@ -404,12 +201,12 @@ Resources:
 
                   # Log all found profiles for debugging
                   foreach ($profile in $UserProfiles) {
-                      Write-Log "Found workshop profile: $($profile.LocalPath)"
+                      Write-Log "Found ${Username} profile: $($profile.LocalPath)"
                   }
               } else {
                   # Deterministically construct workshop.ComputerName path
                   $ComputerName = $env:COMPUTERNAME
-                  $UserProfilePath = "C:\Users\workshop.$ComputerName"
+                  $UserProfilePath = "C:\Users\${Username}.$ComputerName"
                   Write-Log "Using constructed path: $UserProfilePath"
               }
 
@@ -439,6 +236,28 @@ Resources:
               # Refresh environment variables after installations
               $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
+              python --version
+              Set-Location $TempDir
+              python -m venv .venv
+              .\.venv\Scripts\activate
+              python -m pip install boto3 requests requests_aws4auth
+              echo "import json
+              import os
+              import boto3
+              import requests
+              from requests_aws4auth import AWS4Auth
+              if __name__ == '__main__':
+                session = boto3.Session()
+                credentials = session.get_credentials()
+                result = {
+                  "access_key": credentials.access_key,
+                  "secret_key": credentials.secret_key,
+                  "token": credentials.token
+                }
+                print(json.dumps(result))" > init.py
+              # $PYTHON_RESULT = python init.py | ConvertFrom-Json
+              deactivate
+
               # Clone project AFTER Git is installed
               Write-Log "Cloning Spirit of Kiro project..."
               $GitUrl = "${GitCloneUrl}"
@@ -467,8 +286,14 @@ Resources:
                   # Install Bun and run npm commands
                   irm bun.sh/install.ps1 | iex
                   $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-                  npm run install:all
-                  npm run setup:all
+                  
+                  Write-Log "Project setup completed"
+                  Set-Location "$WorkshopDir\${GitCloneBranch}\server"
+                  npm cache clean --force
+                  bun install
+                  Set-Location "$WorkshopDir\${GitCloneBranch}\client"
+                  npm cache clean --force
+                  bun install
 
                   @'
           Set-Location C:\ProgramData\KiroWorkshop\${GitCloneBranch}\server
@@ -505,9 +330,6 @@ Resources:
           $Env:VITE_WS_URL="http://localhost:8080/"
           bun run dev
           '@ | Out-File -FilePath "C:\ProgramData\KiroWorkshop\temp\client.ps1"
-
-                  Write-Log "Project setup completed"
-                  Set-Location $WorkshopDir
               } else {
                   Write-Log "Git not available, skipping clone"
               }
@@ -536,59 +358,57 @@ Resources:
               }
 
               # Set permissions
-              icacls $WorkshopDir /grant "workshop:F" /T /Q
+              icacls $WorkshopDir /grant "${Username}:F" /T /Q
               if (Test-Path $UserProfilePath) {
-                  icacls "$UserProfilePath" /grant "workshop:F" /T /Q
+                  icacls "$UserProfilePath" /grant "${Username}:F" /T /Q
               }
 
               # Create logon script for workshop user (runs after first login)
               Write-Log "Creating workshop user logon script..."
-              $LogonScript = @'
-          # Workshop User First Logon Setup
-          $LogFile = "C:\ProgramData\KiroWorkshop\logon.log"
-          function Write-LogonLog { param([string]$Message); Add-Content -Path $LogFile -Value "[$((Get-Date))] $Message" }
-          Write-LogonLog "Workshop user first logon setup started"
-          $DesktopPath = [Environment]::GetFolderPath("Desktop")
-          Write-LogonLog "Desktop path: $DesktopPath"
-          $WshShell = New-Object -comObject WScript.Shell
-          if (Test-Path "C:\ProgramData\Kiro\Kiro.exe") {
-              $KiroShortcut = $WshShell.CreateShortcut("$DesktopPath\Kiro IDE.lnk")
-              $KiroShortcut.TargetPath = "C:\ProgramData\Kiro\Kiro.exe"
-              $KiroShortcut.WorkingDirectory = "C:\ProgramData\Kiro"
-              $KiroShortcut.Save()
-              Write-LogonLog "Kiro IDE shortcut created"
-          }
-          if (Test-Path "C:\ProgramData\KiroWorkshop\${GitCloneBranch}") {
-              $ProjectShortcut = $WshShell.CreateShortcut("$DesktopPath\Workshop Project.lnk")
-              $ProjectShortcut.TargetPath = "C:\ProgramData\KiroWorkshop\${GitCloneBranch}"
-              $ProjectShortcut.Save()
-              Write-LogonLog "Project shortcut created"
-          }
-          if (Test-Path "C:\ProgramData\KiroWorkshop\temp\server.ps1") {
-              $ServerShortcut = $WshShell.CreateShortcut("$DesktopPath\01 GameServer.lnk")
-              $ServerShortcut.TargetPath = "powershell.exe"
-              $ServerShortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -File C:\ProgramData\KiroWorkshop\temp\server.ps1"
-              $ServerShortcut.Save()
-              $ServerShortcutBytes = [System.IO.File]::ReadAllBytes("$DesktopPath\01 GameServer.lnk")
-              $ServerShortcutBytes[0x15] = $ServerShortcutBytes[0x15] -bor 0x20
-              [System.IO.File]::WriteAllBytes("$DesktopPath\01 GameServer.lnk", $ServerShortcutBytes)
-              Write-LogonLog "Game Server shortcut created"
-          }
-          if (Test-Path "C:\ProgramData\KiroWorkshop\temp\client.ps1") {
-              $ClientShortcut = $WshShell.CreateShortcut("$DesktopPath\02 GameClient.lnk")
-              $ClientShortcut.TargetPath = "powershell.exe"
-              $ClientShortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -File C:\ProgramData\KiroWorkshop\temp\client.ps1"
-              $ClientShortcut.Save()
-              $ClientShortcutBytes = [System.IO.File]::ReadAllBytes("$DesktopPath\02 GameClient.lnk")
-              $ClientShortcutBytes[0x15] = $ClientShortcutBytes[0x15] -bor 0x20
-              [System.IO.File]::WriteAllBytes("$DesktopPath\02 GameClient.lnk", $ClientShortcutBytes)
-              Write-LogonLog "Game Client shortcut created"
-          }
-          Write-LogonLog "Workshop user setup completed"
-          Remove-Item $MyInvocation.MyCommand.Path -Force
-          '@
+              $LogonScript = '# Workshop User First Logon Setup' + "`n"
+              $LogonScript += '$LogFile = "C:\ProgramData\KiroWorkshop\logon.log"' + "`n"
+              $LogonScript += 'function Write-LogonLog { param([string]$Message); Add-Content -Path $LogFile -Value "[$((Get-Date))] $Message" }' + "`n"
+              $LogonScript += 'Write-LogonLog "Workshop user first logon setup started"' + "`n"
+              $LogonScript += '$DesktopPath = [Environment]::GetFolderPath("Desktop")' + "`n"
+              $LogonScript += 'Write-LogonLog "Desktop path: $DesktopPath"' + "`n"
+              $LogonScript += '$WshShell = New-Object -comObject WScript.Shell' + "`n"
+              $LogonScript += 'if (Test-Path "C:\ProgramData\Kiro\Kiro.exe") {' + "`n"
+              $LogonScript += '    $KiroShortcut = $WshShell.CreateShortcut("$DesktopPath\Kiro IDE.lnk")' + "`n"
+              $LogonScript += '    $KiroShortcut.TargetPath = "C:\ProgramData\Kiro\Kiro.exe"' + "`n"
+              $LogonScript += '    $KiroShortcut.WorkingDirectory = "C:\ProgramData\Kiro"' + "`n"
+              $LogonScript += '    $KiroShortcut.Save()' + "`n"
+              $LogonScript += '    Write-LogonLog "Kiro IDE shortcut created"' + "`n"
+              $LogonScript += '}' + "`n"
+              $LogonScript += 'if (Test-Path "C:\ProgramData\KiroWorkshop\${GitCloneBranch}") {' + "`n"
+              $LogonScript += '    $ProjectShortcut = $WshShell.CreateShortcut("$DesktopPath\Workshop Project.lnk")' + "`n"
+              $LogonScript += '    $ProjectShortcut.TargetPath = "C:\ProgramData\KiroWorkshop\${GitCloneBranch}"' + "`n"
+              $LogonScript += '    $ProjectShortcut.Save()' + "`n"
+              $LogonScript += '    Write-LogonLog "Project shortcut created"' + "`n"
+              $LogonScript += '}' + "`n"
+              $LogonScript += 'if (Test-Path "C:\ProgramData\KiroWorkshop\temp\server.ps1") {' + "`n"
+              $LogonScript += '    $ServerShortcut = $WshShell.CreateShortcut("$DesktopPath\01 GameServer.lnk")' + "`n"
+              $LogonScript += '    $ServerShortcut.TargetPath = "powershell.exe"' + "`n"
+              $LogonScript += '    $ServerShortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -File C:\ProgramData\KiroWorkshop\temp\server.ps1"' + "`n"
+              $LogonScript += '    $ServerShortcut.Save()' + "`n"
+              $LogonScript += '    $ServerShortcutBytes = [System.IO.File]::ReadAllBytes("$DesktopPath\01 GameServer.lnk")' + "`n"
+              $LogonScript += '    $ServerShortcutBytes[0x15] = $ServerShortcutBytes[0x15] -bor 0x20' + "`n"
+              $LogonScript += '    [System.IO.File]::WriteAllBytes("$DesktopPath\01 GameServer.lnk", $ServerShortcutBytes)' + "`n"
+              $LogonScript += '    Write-LogonLog "Game Server shortcut created"' + "`n"
+              $LogonScript += '}' + "`n"
+              $LogonScript += 'if (Test-Path "C:\ProgramData\KiroWorkshop\temp\client.ps1") {' + "`n"
+              $LogonScript += '    $ClientShortcut = $WshShell.CreateShortcut("$DesktopPath\02 GameClient.lnk")' + "`n"
+              $LogonScript += '    $ClientShortcut.TargetPath = "powershell.exe"' + "`n"
+              $LogonScript += '    $ClientShortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -File C:\ProgramData\KiroWorkshop\temp\client.ps1"' + "`n"
+              $LogonScript += '    $ClientShortcut.Save()' + "`n"
+              $LogonScript += '    $ClientShortcutBytes = [System.IO.File]::ReadAllBytes("$DesktopPath\02 GameClient.lnk")' + "`n"
+              $LogonScript += '    $ClientShortcutBytes[0x15] = $ClientShortcutBytes[0x15] -bor 0x20' + "`n"
+              $LogonScript += '    [System.IO.File]::WriteAllBytes("$DesktopPath\02 GameClient.lnk", $ClientShortcutBytes)' + "`n"
+              $LogonScript += '    Write-LogonLog "Game Client shortcut created"' + "`n"
+              $LogonScript += '}' + "`n"
+              $LogonScript += 'Write-LogonLog "Workshop user setup completed"' + "`n"
+              $LogonScript += 'Remove-Item $MyInvocation.MyCommand.Path -Force' + "`n"
 
-              $LogonScriptPath = "C:\ProgramData\KiroWorkshop\workshop-setup.ps1"
+              $LogonScriptPath = "C:\ProgramData\KiroWorkshop\${Username}-setup.ps1"
               Set-Content -Path $LogonScriptPath -Value $LogonScript
 
               # Set logon script in registry for workshop user
@@ -597,7 +417,7 @@ Resources:
 
               # Install Kiro IDE - Minimal approach
               Write-Log "Installing Kiro IDE..."
-              $KiroUrl = "https://prod.download.desktop.kiro.dev/releases/202509172055-Kiro-win32-x64.exe"
+              $KiroUrl = "https://prod.download.desktop.kiro.dev/releases/stable/win32-x64/signed/0.7.45/kiro-ide-0.7.45-stable-win32-x64.exe"
               $KiroInstaller = "$TempDir\kiro-installer.exe"
               Invoke-WebRequest -Uri $KiroUrl -OutFile $KiroInstaller -TimeoutSec 300
               $proc = Start-Process $KiroInstaller -ArgumentList "/VERYSILENT", "/NORESTART" -PassThru
@@ -610,236 +430,152 @@ Resources:
               $ProgramDataKiroPath = "C:\ProgramData\Kiro"
               if (Test-Path $KiroInstallDir) {
                   robocopy "$KiroInstallDir" "$ProgramDataKiroPath" /E /R:1 /W:1 /NP
-                  icacls "$ProgramDataKiroPath" /grant "workshop:F" /T /Q
+                  icacls "$ProgramDataKiroPath" /grant "${Username}:F" /T /Q
               }
-
-              Write-Log "Setup completed successfully! System will reboot in 10 seconds..."
-              Write-Log "After reboot, workshop user login will create desktop shortcuts automatically."
-
-              # Update EC2 Instance State - CREATE_COMPLETE
-              cfn-signal --success true --stack ${AWS::StackName} --resource WindowsInstance --region ${AWS::Region}
-
           } catch {
-              # Update EC2 Instance State - CREATE_FAILED
-              cfn-signal --success false --stack ${AWS::StackName} --resource WindowsInstance --region ${AWS::Region}
-
               Write-Log "Setup failed: $($_.Exception.Message)"
+              cfn-signal --success false --stack ${AWS::StackName} --resource WindowsEc2 --region ${AWS::Region}
               throw
           }
+
+          cfn-signal --success true --stack ${AWS::StackName} --resource WindowsEc2 --region ${AWS::Region}
+          shutdown /r /t 5 /c "Kiro Workshop setup completed"
           </powershell>
+  WindowsEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: windows-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 3389,
+          "ToPort": 3389,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
       Tags:
         - Key: Name
-          Value: KiroWindowsServer
-        - Key: Platform
-          Value: Windows
-        - Key: Environment
-          Value: Workshop
-
-  KiroSetup:
-    Type: AWS::SSM::Association
-    DependsOn:
-      - WindowsInstance
+          Value: windows-sg
+  WindowsEc2IamRole:
+    Type: AWS::IAM::Role
     Properties:
-      Name: AWS-RunPowerShellScript
-      WaitForSuccessTimeoutSeconds: 300
-      Targets:
-        - Key: InstanceIds
-          Values:
-            - !Ref WindowsInstance
-      Parameters:
-        commands:
-          - !Sub |
-              <powershell>
-              $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-              $TempDir = "C:\ProgramData\KiroWorkshop\temp"
-              Set-Location $TempDir
-              python -m venv .venv
-              .\.venv\Scripts\activate
-              python -m pip install boto3 requests requests_aws4auth
-              @"
-              import time
-              import boto3
-              import requests
-              from requests_aws4auth import AWS4Auth
-              if __name__ == '__main__':
-                result = {}
-                region = '${AWS::Region}'
-                session = boto3.Session()
-                credentials = session.get_credentials()
-                
-                service = 'sso'
-                auth = AWS4Auth(
-                  credentials.access_key,
-                  credentials.secret_key,
-                  region,
-                  service,
-                  session_token=credentials.token
-                )
-                url = f'https://sso.{region}.amazonaws.com/control/'
-                headers = {
-                  'Content-Type': 'application/x-amz-json-1.1',
-                  'X-Amz-Target': 'SWBService.UpdateSsoConfiguration',
-                  'X-Amz-User-Agent': 'aws-sdk-js/2.1467.0 promise'
-                }
-                payload = {
-                  'instanceArn': '${IamIdentityCenterInstance.InstanceArn}',
-                  'configurationType': 'APP_AUTHENTICATION_CONFIGURATION',
-                  'ssoConfiguration': {
-                    'mfaMode': 'DISABLED'
-                  }
-                }
-                response = requests.post(url, auth=auth, headers=headers, json=payload)
-                
-                identity_store = boto3.client('identitystore', region_name=region)
-                identity_store_id = '${IamIdentityCenterInstance.IdentityStoreId}'
-                try:
-                  existing_users = identity_store.list_users(
-                    IdentityStoreId=identity_store_id,
-                    Filters=[
-                      {
-                        'AttributePath': 'UserName',
-                        'AttributeValue': 'kiro'
-                      }
-                    ]
-                  )
-                  for existing_user in existing_users.get('Users', []):
-                    identity_store.delete_user(
-                      IdentityStoreId=identity_store_id,
-                      UserId=existing_user['UserId']
-                    )
-                except Exception as e:
-                  print(e)
-                user = identity_store.create_user(
-                  IdentityStoreId=identity_store_id,
-                  UserName='kiro',
-                  Name={
-                    'GivenName': 'Kiro',
-                    'FamilyName': 'User'
-                  },
-                  DisplayName='Kiro User',
-                  Emails=[
-                    {
-                      'Type': 'work',
-                      'Value': 'change@email.com',
-                      'Primary': True
-                    }
-                  ]
-                )
-                user_id = user.get('UserId')
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  WindowsEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref WindowsEc2IamRole
 
-                service = 'userpool'
-                auth = AWS4Auth(
-                  credentials.access_key,
-                  credentials.secret_key,
-                  region,
-                  service,
-                  session_token=credentials.token
-                )
-                url = f'https://identitystore.{region}.amazonaws.com/'
-                headers = {
-                  'Content-Type': 'application/x-amz-json-1.0',
-                  'X-Amz-Target': 'SWBUPService.UpdatePassword',
-                  'X-Amz-User-Agent': 'aws-sdk-js/2.1467.0 promise'
-                }
-                payload = {
-                  'UserId': user_id,
-                  'PasswordMode': 'OTP'
-                }
-                response = requests.post(url, auth=auth, headers=headers, json=payload)
+  WindowsUserPassword:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${Username}"}'
+        GenerateStringKey: password
+        PasswordLength: 20
+        ExcludeCharacters: '"@/\'
+        RequireEachIncludedType: true
+        IncludeSpace: false
+  SecretPlaintext:
+    Type: Custom::SecretPlaintextLambda
+    Properties:
+      ServiceToken: !GetAtt SecretPlaintextLambda.Arn
+      ServiceTimeout: 15
+      SecretArn: !Ref WindowsUserPassword
+  SecretPlaintextLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub lambda.${AWS::URLSuffix}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecretsManagerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
+  SecretPlaintextLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Return the value of the secret
+      Handler: index.lambda_handler
+      Runtime: python3.13
+      MemorySize: 128
+      Timeout: 10
+      Architectures:
+        - arm64
+      Role: !GetAtt SecretPlaintextLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import cfnresponse
+          import logging
 
-                secretsmanager = boto3.client('secretsmanager', region_name=region)
-                secret_name = '${AWS::StackName}-kiro-one-time-password'
-                password = response.json().get('Password')
-                try:
-                  secretsmanager.create_secret(
-                    Name=secret_name,
-                    SecretString=password
-                  )
-                except secretsmanager.exceptions.ResourceExistsException:
-                  secretsmanager.update_secret(
-                    SecretId=secret_name,
-                    SecretString=password
-                  )
-                
-                service = 'codewhisperer'
-                auth = AWS4Auth(
-                  credentials.access_key,
-                  credentials.secret_key,
-                  region,
-                  service,
-                  session_token=credentials.token
-                )
-                url = f'https://codewhisperer.{region}.amazonaws.com/'
-                headers = {
-                  'Content-Type': 'application/x-amz-json-1.0',
-                  'X-Amz-Target': 'AWSCodeWhispererService.CreateProfile',
-                  'X-Amz-User-Agent': 'aws-sdk-js/2.1692.0 promise'
-                }
-                payload = {
-                    'profileName': f'KiroProfile-{region}',
-                    'referenceTrackerConfiguration': {
-                        'recommendationsWithReferences': 'ALLOW'
-                    },
-                    'activeFunctionalities': [
-                        'ANALYSIS',
-                        'CONVERSATIONS',
-                        'TASK_ASSIST',
-                        'TRANSFORMATIONS',
-                        'COMPLETIONS'
-                    ],
-                    'optInFeatures': {
-                        'dashboardAnalytics': {
-                            'toggle': 'ON'
-                        }
-                    },
-                    'identitySource': {
-                        'ssoIdentitySource': {
-                            'instanceArn': '${IamIdentityCenterInstance.InstanceArn}',
-                            'ssoRegion': region
-                        }
-                    },
-                    'clientToken': str(int(time.time() * 1e9))
-                }
-                response = requests.post(url, auth=auth, headers=headers, json=payload)
-                
-                service = 'q'
-                auth = AWS4Auth(
-                  credentials.access_key,
-                  credentials.secret_key,
-                  region,
-                  service,
-                  session_token=credentials.token
-                )
-                url = f'https://codewhisperer.{region}.amazonaws.com/'
-                headers = {
-                  'Content-Type': 'application/x-amz-json-1.0',
-                  'X-Amz-Target': 'AmazonQDeveloperService.CreateAssignment',
-                  'X-Amz-User-Agent': 'aws-sdk-js/2.1692.0 promise'
-                }
-                payload = {
-                  'principalId': user_id,
-                  'principalType': 'USER',
-                  'subscriptionType': 'Q_DEVELOPER_STANDALONE_PRO'
-                }
-                response = requests.post(url, auth=auth, headers=headers, json=payload)
-                retry = 5
-                while (response.status_code != 200 and retry > 0):
-                  response = requests.post(url, auth=auth, headers=headers, json=payload)
-                  time.sleep(10)
-                  retry -= 1
-              "@ | Out-File -FilePath $TempDir\init.py -Encoding UTF8
-              python $TempDir\init.py
-              deactivate
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
 
-              # Schedule system reboot
-              shutdown /r /t 10 /c "Kiro Workshop setup completed. Rebooting to finalize configuration."
-              </powershell>
+          def is_valid_json(json_string):
+            logger.debug(f'Calling is_valid_json: {json_string}')
+            try:
+              json.loads(json_string)
+              logger.info('Secret is in json format')
+              return True
+            except json.JSONDecodeError:
+              logger.info('Secret is in string format')
+              return False
 
-  # Kiro User Auth (IAM Identity Center)
-  IamIdentityCenterInstance:
-    Type: AWS::SSO::Instance
-  
-  # Spirit of Kiro - Cognito User Pool
+          def lambda_handler(event, context):
+            logger.debug(f'event: {event}')
+            logger.debug(f'context: {context}')
+            try:
+              if event['RequestType'] == 'Delete':
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
+              else:
+                resource_properties = event['ResourceProperties']
+                secret_name = resource_properties['SecretArn']
+                secrets_mgr = boto3.client('secretsmanager')
+                logger.info(f'Getting secret from {secret_name}')
+                secret = secrets_mgr.get_secret_value(SecretId=secret_name)
+                logger.debug(f'secret: {secret}')
+                secret_value = secret['SecretString']
+
+                responseData = {}
+                if is_valid_json(secret_value):
+                    secret_json = json.loads(secret_value)
+                    responseData = secret_json
+                else:
+                    responseData = {'secret': secret_value}
+
+                logger.debug(f'responseData: {responseData}')
+                logger.debug(f'type(responseData): {type(responseData)}')
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData=responseData, reason='OK', noEcho=True)
+            except Exception as e:
+              logger.error(e)
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason=str(e))
+
   UserPool:
     Type: AWS::Cognito::UserPool
     DeletionPolicy: Delete
@@ -870,8 +606,6 @@ Resources:
         CaseSensitive: false
       UserPoolAddOns:
         AdvancedSecurityMode: "OFF"
-  
-  # Spirit of Kiro - Cognito User Pool Client
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
@@ -889,7 +623,6 @@ Resources:
         IdToken: hours
         RefreshToken: days
   
-  # Spirit of Kiro - DynamoDB ItemsTable
   ItemsTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Delete
@@ -904,8 +637,6 @@ Resources:
       KeySchema:
         - AttributeName: id
           KeyType: HASH
-  
-  # Spirit of Kiro - InventoryTable ItemsTable
   InventoryTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Delete
@@ -924,8 +655,6 @@ Resources:
           KeyType: HASH
         - AttributeName: itemId
           KeyType: RANGE
-  
-  # Spirit of Kiro - LocationTable ItemsTable
   LocationTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Delete
@@ -944,8 +673,6 @@ Resources:
           KeyType: HASH
         - AttributeName: location
           KeyType: RANGE
-  
-  # Spirit of Kiro - UsersTable ItemsTable
   UsersTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Delete
@@ -960,8 +687,6 @@ Resources:
       KeySchema:
         - AttributeName: userId
           KeyType: HASH
-  
-  # Spirit of Kiro - UsernamesTable ItemsTable
   UsernamesTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Delete
@@ -976,8 +701,6 @@ Resources:
       KeySchema:
         - AttributeName: username
           KeyType: HASH
-  
-  # Spirit of Kiro - PersonaTable ItemsTable
   PersonaTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Delete
@@ -998,26 +721,9 @@ Resources:
           KeyType: RANGE
 
 Outputs:
-  CurrentRegion:
-    Description: Current workshop region
-    Value: !Ref AWS::Region
-  # Kiro Access
-  KiroSignInUrl:
-    Description: Kiro sign in URL
-    Value: !Sub https://${IamIdentityCenterInstance.IdentityStoreId}.awsapps.com/start
-  KiroUsername:
-    Description: Kiro username
-    Value: kiro
-  KiroUserpassword:
-    Description: Kiro one time password (plaintext via Lambda custom resource)
-    Value: !GetAtt KiroOneTimePassword.secret
-  # RDP Access
-  RdpAddress:
-    Description: Public IP address of the Windows Kiro instance (IP:port)
-    Value: !Sub ${WindowsInstance.PublicIp}:3389
-  RdpUsername:
-    Description: Windows RDP username
-    Value: workshop
-  RdpUserpassword:
-    Description: Windows RDP password (plaintext via Lambda custom resource)
+  01RdpUrl:
+    Value: !Sub ${WindowsEc2.PublicIp}:3389
+  02Username:
+    Value: !Ref Username
+  03Password:
     Value: !GetAtt SecretPlaintext.password
