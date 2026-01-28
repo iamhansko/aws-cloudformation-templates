@@ -1,0 +1,243 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  Password:
+    Type: String
+    Default: Ubuntu1234!
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  RegionMapping:
+    us-east-1:
+      AmiId: ami-0b6c6ebed2801a5cb
+    us-east-2:
+      AmiId: ami-06e3c045d79fd65d9
+    us-west-2:
+      AmiId: ami-0786adace1541ca80
+    ap-northeast-1:
+      AmiId: ami-0f65fc8c24ec8d2a1
+    ap-northeast-2:
+      AmiId: ami-0130d8d35bcd2d433
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId: 
+            Ref: !Sub PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - VpcInternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  UbuntuEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: m5.2xlarge
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref UbuntuEc2SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 100
+            DeleteOnTermination: true
+            Encrypted: false
+      Tags: 
+        - Key: Name
+          Value: ubuntu
+      IamInstanceProfile: !Ref UbuntuEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -x
+
+          apt update -yq
+          apt upgrade -yq
+          apt install -yq git
+          apt install -yq python3 python3-pip python3-venv
+          ln -sf /usr/bin/python3 /usr/bin/python
+          cd /home/ubuntu
+
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+          tee /etc/apt/sources.list.d/docker.sources <<EOF
+          Types: deb
+          URIs: https://download.docker.com/linux/ubuntu
+          Suites: $(. /etc/os-release && echo "${!UBUNTU_CODENAME:-$VERSION_CODENAME}")
+          Components: stable
+          Signed-By: /etc/apt/keyrings/docker.asc
+          EOF
+          apt update -yq
+          apt install -yq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          systemctl enable --now docker
+          usermod -aG docker ubuntu
+
+          echo "ubuntu:${Password}" | chpasswd
+          usermod -aG sudo ubuntu
+          DEBIAN_FRONTEND=noninteractive apt install -yq ubuntu-desktop
+
+          # curl -fsSL https://raw.githubusercontent.com/abhilashiig/kiro-ide-linux-installation/main/clone-and-install-kiro.sh | bash
+
+          su - ubuntu << 'EOF'
+          mkdir ~/Desktop
+          cd ~/Desktop
+
+          echo '#!/bin/bash
+          export TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          export IAM_ROLE=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/iam/security-credentials/)
+          export CREDENTIALS=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/iam/security-credentials/$IAM_ROLE)
+          export AWS_ACCESS_KEY_ID=$(echo $CREDENTIALS | jq -r '.AccessKeyId')
+          export AWS_SECRET_ACCESS_KEY=$(echo $CREDENTIALS | jq -r '.SecretAccessKey')
+          export AWS_SESSION_TOKEN=$(echo $CREDENTIALS | jq -r '.Token')
+          echo -e "\n"
+          echo -e "AWS_ACCESS_KEY_ID : $AWS_ACCESS_KEY_ID \n\nAWS_SECRET_ACCESS_KEY : $AWS_SECRET_ACCESS_KEY \n\nAWS_SESSION_TOKEN : $AWS_SESSION_TOKEN\n"
+          
+          # source ./scripts/env.sh
+          ' > ./scripts/env.sh
+          chmod +x ./scripts/env.sh
+          source ./scripts/env.sh
+          EOF
+          
+          apt install -yq xrdp
+          systemctl enable --now xrdp
+          adduser xrdp ssl-cert
+          systemctl restart xrdp
+          
+          mkdir -p /home/ubuntu/.venv
+          python -m venv /home/ubuntu/.venv
+          source /home/ubuntu/.venv/bin/activate
+          curl -LO https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+          tar -xvzf aws-cfn-bootstrap-py3-latest.tar.gz
+          ln -sf aws-cfn-bootstrap-2.0/init/ubuntu/cfn-hup /etc/init.d/cfn-hup
+          python -m pip install aws-cfn-bootstrap-py3-latest.tar.gz
+          cfn-signal -e $? --stack ${AWS::StackName} --resource UbuntuEc2 --region ${AWS::Region}
+          deactivate
+          chown -R ubuntu:ubuntu /home/ubuntu/.venv
+  UbuntuEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: ubuntu-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 3389,
+          "ToPort": 3389,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: ubuntu-sg
+  UbuntuEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  UbuntuEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref UbuntuEc2IamRole
+
+Outputs:
+  01RdpUrl:
+    Value: !Sub ${UbuntuEc2.PublicIp}:3389
+  02Username:
+    Value: ubuntu
+  03Password:
+    Value: !Ref Password
