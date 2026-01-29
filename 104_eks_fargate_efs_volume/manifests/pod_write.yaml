@@ -1,0 +1,18 @@
+# After PV/PVC Created
+apiVersion: v1
+kind: Pod
+metadata:
+  name: write
+spec:
+  containers:
+  - name: write
+    image: busybox 
+    command: ["/bin/sh"] 
+    args: ["-c", "while true; do echo $(date -u) >> /data/out1.txt; sleep 30; done"]
+    volumeMounts:
+    - name: efs-volume
+      mountPath: /data
+  volumes:
+  - name: efs-volume
+    persistentVolumeClaim:
+      claimName: efs-pvc
