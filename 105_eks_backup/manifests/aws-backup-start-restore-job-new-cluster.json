@@ -1,0 +1,89 @@
+{
+  "clusterName": "NewCluster",
+  "newCluster": true,
+  "kubernetesRestoreOrder": [],
+  "namespaces": [],
+  "namespacePvMapping": {
+    "default": [
+      "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0dd5e45a70539ea7b",
+      "arn:aws:elasticfilesystem:ap-northeast-2:123456789012:file-system/fs-0159bca240ec2701e",
+      "arn:aws:s3:::s3bucket-ylo2gsdr6lir"
+    ]
+  },
+  "nestedRestoreJobs": {
+    "arn:aws:backup:ap-northeast-2:123456789012:recovery-point:s3bucket-ylo2gsdr6lir-20260203040046-34db39ea": {
+      "DestinationBucketName": "s3bucket-ylo2gsdr6lir",
+      "ItemsToRestore": [],
+      "NewBucket": false,
+      "Encrypted": true,
+      "CreationToken": "console-1770098256466",
+      "EncryptionType": "original",
+      "ObjectsToRestore": [],
+      "RestoreLatestVersionsUpTo": 1,
+      "RestoreACLs": false
+    },
+    "arn:aws:backup:ap-northeast-2:123456789012:recovery-point:b71a0136-4aaf-412f-bcf1-28acc1eb5ad0": {
+      "NewFileSystem": false,
+      "file-system-id": "fs-0159bca240ec2701e"
+    },
+    "arn:aws:ec2:ap-northeast-2::snapshot/snap-03e1dcf11a896bf8d": {
+      "encrypted": true,
+      "kmsKeyId": "arn:aws:kms:ap-northeast-2:123456789012:key/52d37049-dc68-42e6-b453-b370b2be6243",
+      "volumeSize": 4,
+      "volumeType": "gp2",
+      "availabilityZone": "ap-northeast-2a",
+      "iops": "",
+      "throughput": ""
+    }
+  },
+  "restoreKubernetesManifestsOnly": false,
+  "namespaceLevelRestore": false,
+  "eksClusterVersion": "1.34",
+  "clusterRole": "arn:aws:iam::123456789012:role/EksClusterIamRole-SYv2d56dGc6z",
+  "clusterVpcConfig": {
+    "vpcId": "vpc-05941fb45630800ba",
+    "subnetIds": [
+      "subnet-0d42c6d1a2cb390a8",
+      "subnet-07673cf0113662df5",
+      "subnet-0d9e23e71724dd99c",
+      "subnet-0afbf28fd1522f874"
+    ],
+    "securityGroupIds": []
+  },
+  "nodeGroups": [
+    {
+      "nodeGroupId": "app-mng",
+      "subnetIds": [
+        "subnet-0d9e23e71724dd99c",
+        "subnet-0afbf28fd1522f874"
+      ],
+      "nodeRole": "arn:aws:iam::123456789012:role/EksNodeIamRole-4Ovs8kKjdpHT",
+      "instanceTypes": [
+        "t3.large"
+      ]
+    }
+  ],
+  "fargateProfiles": [],
+  "podIdentityAssociations": [
+    {
+      "associationId": "a-5lhfmj4mgale1szmv",
+      "roleArn": "arn:aws:iam::123456789012:role/AwsLoadBalancerControllerRole-jlS9TALPfveq",
+      "ownerArn": null
+    },
+    {
+      "associationId": "a-bvepxqyxxjj3jscgc",
+      "roleArn": "arn:aws:iam::123456789012:role/MountpointS3CsiDriverIamRole-UbZqIgMKzBWX",
+      "ownerArn": "arn:aws:eks:ap-northeast-2:123456789012:addon/PrimaryCluster-r5Yd3bIERdZa/aws-mountpoint-s3-csi-driver/6ece10d0-164a-b8c7-6a15-0e1d737de0a0"
+    },
+    {
+      "associationId": "a-uuz2r90jbf5uo5cyl",
+      "roleArn": "arn:aws:iam::123456789012:role/EbsCsiDriverAddonIamRole-Y0rRBkxkIkuv",
+      "ownerArn": "arn:aws:eks:ap-northeast-2:123456789012:addon/PrimaryCluster-r5Yd3bIERdZa/aws-ebs-csi-driver/bece10d0-0d01-70f0-a061-c356b2cbc5a5"
+    },
+    {
+      "associationId": "a-xls2bvyfbuzjvtj64",
+      "roleArn": "arn:aws:iam::123456789012:role/EfsCsiDriverAddonIamRole-WHmpnF7NlZNb",
+      "ownerArn": "arn:aws:eks:ap-northeast-2:123456789012:addon/PrimaryCluster-r5Yd3bIERdZa/aws-efs-csi-driver/08ce10d0-0d21-0dcb-f541-789e4b4df2a4"
+    }
+  ]
+}

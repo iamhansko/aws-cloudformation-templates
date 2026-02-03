@@ -1,0 +1,41 @@
+{
+  "clusterName": "SecondaryCluster-A0oMW56fIN7U",
+  "newCluster": false,
+  "kubernetesRestoreOrder": [],
+  "namespaces": [],
+  "namespacePvMapping": {
+    "default": [
+      "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0dd5e45a70539ea7b",
+      "arn:aws:elasticfilesystem:ap-northeast-2:123456789012:file-system/fs-0159bca240ec2701e",
+      "arn:aws:s3:::s3bucket-ylo2gsdr6lir"
+    ]
+  },
+  "nestedRestoreJobs": {
+    "arn:aws:backup:ap-northeast-2:123456789012:recovery-point:s3bucket-ylo2gsdr6lir-20260203040046-34db39ea": {
+      "DestinationBucketName": "s3bucket-ylo2gsdr6lir",
+      "ItemsToRestore": [],
+      "NewBucket": false,
+      "Encrypted": true,
+      "CreationToken": "console-1770099582772",
+      "EncryptionType": "original",
+      "ObjectsToRestore": [],
+      "RestoreLatestVersionsUpTo": 1,
+      "RestoreACLs": false
+    },
+    "arn:aws:backup:ap-northeast-2:123456789012:recovery-point:b71a0136-4aaf-412f-bcf1-28acc1eb5ad0": {
+      "NewFileSystem": false,
+      "file-system-id": "fs-0159bca240ec2701e"
+    },
+    "arn:aws:ec2:ap-northeast-2::snapshot/snap-03e1dcf11a896bf8d": {
+      "encrypted": true,
+      "kmsKeyId": "arn:aws:kms:ap-northeast-2:123456789012:key/52d37049-dc68-42e6-b453-b370b2be6243",
+      "volumeSize": 4,
+      "volumeType": "gp2",
+      "availabilityZone": "ap-northeast-2a",
+      "iops": "",
+      "throughput": ""
+    }
+  },
+  "restoreKubernetesManifestsOnly": false,
+  "namespaceLevelRestore": false
+}
