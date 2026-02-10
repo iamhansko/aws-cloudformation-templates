@@ -1,0 +1,633 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+  VsCodeVersion:
+    Type: String
+    Default: "4.108.2"
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, c]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId: 
+            Ref: !Sub PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - VpcInternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, c]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      NatgatewayElasticIp${Az}:
+        Type: AWS::EC2::EIP
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PrivateSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PrivateSubnet${Az}
+  PrivateSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub private-rt
+  PrivateSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+      RouteTableId: !Ref PrivateSubnetRouteTable
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn:
+      - VpcInternetGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityMode: regional
+      AvailabilityZoneAddresses:
+        - AvailabilityZone: !Sub ${AWS::Region}a
+          AllocationIds: 
+            - !GetAtt NatgatewayElasticIpa.AllocationId
+        - AvailabilityZone: !Sub ${AWS::Region}c
+          AllocationIds: 
+            - !GetAtt NatgatewayElasticIpc.AllocationId
+      Tags: 
+        - Key : Name
+          Value : !Sub regional-natgw
+  
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet:
+            - !Ref VsCodeEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData: 
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git
+          dnf groupinstall -yq "Development Tools"
+
+          export VSC_VERSION="${VsCodeVersion}"
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          sudo -Eu ec2-user bash << 'EOF'
+          cd /home/ec2-user
+          mkdir -p /home/ec2-user/python
+          echo 'FROM python:3.14-slim' > /home/ec2-user/python/Dockerfile
+          echo 'print("Hello World")' > /home/ec2-user/python/app.py
+          cd /home/ec2-user/python
+          zip -r src.zip ./*
+          aws s3 cp src.zip s3://${CodeCommitS3Bucket}
+
+          EOF
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vscode-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: vscode-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref VsCodeEc2IamRole
+  
+  CodeCommit:
+    Type: AWS::CodeCommit::Repository
+    DependsOn: 
+      - VsCodeEc2
+    Properties:
+      RepositoryName: python-app-repo
+      Code: 
+        S3: 
+          Bucket: !Ref CodeCommitS3Bucket
+          Key: src.zip
+        # BranchName: main
+      # Triggers: 
+      #   - Branches: 
+      #       - 
+      #     CustomData: 
+      #     DestinationArn: 
+      #     Events: 
+      #       - 
+      #     Name: 
+  CodeCommitS3Bucket:
+    Type: AWS::S3::Bucket
+
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: python-app-build
+      Artifacts: 
+        Type: CODEPIPELINE
+      Cache: 
+        Type: LOCAL
+        Modes: 
+          - LOCAL_SOURCE_CACHE
+          - LOCAL_DOCKER_LAYER_CACHE
+        # CacheNamespace:
+        # Location:
+      ConcurrentBuildLimit: 6
+      Environment: 
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: True
+        # RegistryCredential:
+        #   Credential:
+        #   CredentialProvider:
+        # Certificate:
+        # EnvironmentVariables:
+        #   - Name:
+        #     Type:
+        #     Value:
+        # Fleet:
+      ServiceRole: !GetAtt CodeBuildIamRole.Arn
+      TimeoutInMinutes: 5
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            variables:
+              AWS_ACCOUNT_ID: ${AWS::AccountId}
+              IMAGE_REPO_NAME: ${Ecr}
+              IMAGE_REPO_URI: ${Ecr.RepositoryUri}
+          phases:
+            pre_build:
+              commands:
+                - ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime
+                - aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com 
+            build:
+              commands:
+                - BUILD_ID=$(echo $CODEBUILD_BUILD_ID | cut -d':' -f2)
+                - NEW_TAG=$(date "+%Y%m%d%H%M%S")
+                - |
+                  cat > BUILD.md << EOF 
+                    codebuild: $BUILD_ID
+                    codepipeline: $EXECUTION_ID
+                  EOF
+                - docker build -t $IMAGE_REPO_URI:$NEW_TAG .
+                - docker push $IMAGE_REPO_URI:$NEW_TAG
+            post_build:
+              commands:
+                - echo $CODEBUILD_BUILD_ID
+                - echo $EXECUTION_ID
+          artifacts:
+            files:
+              - BUILD.md
+            discard-paths: yes
+      # https://docs.aws.amazon.com/codebuild/latest/userguide/sample-build-badges.html
+      # BadgeEnabled: True / False
+      # BuildBatchConfig: 
+      #     BatchReportMode: String
+      #     CombineArtifacts: Boolean
+      #     Restrictions: 
+      #       ComputeTypesAllowed: 
+      #         - String
+      #       MaximumBuildsAllowed: Integer
+      #     ServiceRole: String
+      #     TimeoutInMins: Integer
+      # FileSystemLocations: 
+      #   - Identifier: String
+      #     Location: String
+      #     MountOptions: String
+      #     MountPoint: String
+      #     Type: String
+      # LogsConfig: 
+      #   CloudWatchLogs: 
+      #     GroupName: String
+      #     Status: String
+      #     StreamName: String
+      #   S3Logs: 
+      #     EncryptionDisabled: Boolean
+      #     Location: String
+      #     Status: String
+      # QueuedTimeoutInMinutes: Integer
+      # Triggers: 
+      #   BuildType: String
+      #   FilterGroups: 
+      #     - []
+      #   ScopeConfiguration: 
+      #     Domain: String
+      #     Name: String
+      #     Scope: String
+      #   Webhook: Boolean
+      # Visibility: String
+      # ResourceAccessRole: String
+      # VpcConfig: 
+      #   SecurityGroupIds: 
+      #     - String
+      #   Subnets: 
+      #     - String
+      #   VpcId: String
+  CodeBuildIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+
+  # CodeDeployDeploymentGroup:
+  #   Type: AWS::CodeDeploy::DeploymentGroup
+  #   Properties:
+  #     ApplicationName: !Ref CodeDeployApplication
+  #     ServiceRoleArn: String
+  #     AutoRollbackConfiguration: 
+  #       Enabled: False
+  #     AutoScalingGroups: 
+  #       - !Ref AppAutoScalingGroup
+  #     LoadBalancerInfo: 
+  #       ElbInfoList: 
+  #         - Name: String
+  #       TargetGroupInfoList: 
+  #         - Name: String
+  #       TargetGroupPairInfoList: 
+  #         - ProdTrafficRoute: 
+  #             ListenerArns: 
+  #               - String
+  #           TestTrafficRoute: 
+  #             ListenerArns: 
+  #             - String
+  #           TargetGroups: 
+  #             - Name: String
+  #       # Events: 
+  #       #   - DEPLOYMENT_FAILURE
+  #       #   - DEPLOYMENT_STOP_ON_ALARM
+  #       #   - DEPLOYMENT_STOP_ON_REQUEST
+  #     # BlueGreenDeploymentConfiguration: 
+  #     #   DeploymentReadyOption: 
+  #     #     ActionOnTimeout: String
+  #     #     WaitTimeInMinutes: Integer
+  #     #   GreenFleetProvisioningOption: 
+  #     #     Action: String
+  #     #   TerminateBlueInstancesOnDeploymentSuccess: 
+  #     #     Action: String
+  #     #     TerminationWaitTimeInMinutes: Integer
+  #     # DeploymentStyle: 
+  #     #   DeploymentOption: WITH_TRAFFIC_CONTROL | WITHOUT_TRAFFIC_CONTROL
+  #     #   DeploymentType: IN_PLACE | BLUE_GREEN
+  #     # Deployment: 
+  #     #   Description: String
+  #     #   IgnoreApplicationStopFailures: Boolean
+  #     #   Revision: 
+  #     #     GitHubLocation: 
+  #     #       CommitId: String
+  #     #       Repository: String
+  #     #     RevisionType: String
+  #     #     S3Location: 
+  #     #       Bucket: String
+  #     #       BundleType: String
+  #     #       ETag: String
+  #     #       Key: String
+  #     #       Version: String
+  #     # DeploymentConfigName: String
+  #     # Ec2TagFilters: 
+  #     #   - Key: String
+  #     #     Type: String
+  #     #     Value: String
+  #     # Ec2TagSet: 
+  #     #   Ec2TagSetList:
+  #     #     - Ec2TagGroup: 
+  #     #         - Key: String
+  #     #           Type: String
+  #     #           Value: String
+  #     # AlarmConfiguration: 
+  #     #   Alarms: 
+  #     #     - Name: String
+  #     #   Enabled: Boolean
+  #     #   IgnorePollAlarmFailure: Boolean
+  #     # ECSServices: 
+  #     #   - ClusterName: String
+  #     #     ServiceName: String
+  #     # OnPremisesInstanceTagFilters: 
+  #     #   - Key: String
+  #     #     Type: String
+  #     #     Value: String
+  #     # OnPremisesTagSet: 
+  #     #   OnPremisesTagSetList: 
+  #     #     - OnPremisesTagGroup: 
+  #     #         - Key: String
+  #     #           Type: String
+  #     #           Value: String
+  #     # OutdatedInstancesStrategy: String
+  #     # TerminationHookEnabled: Boolean
+  #     # TriggerConfigurations: 
+  #     #   - TriggerEvents: 
+  #     #       - String
+  #     #     TriggerName: String
+  #     #     TriggerTargetArn: String
+  # CodeDeployApplication:
+  #   Type: AWS::CodeDeploy::Application
+  #   Properties:
+  #     ComputePlatform: Server
+  
+  AppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: 3
+      DesiredCapacity: 3
+      MaxSize: 6
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref AppLaunchTemplate
+        Version: 1
+      VPCZoneIdentifier: 
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetc
+      Cooldown: 60
+      DefaultInstanceWarmup: 60
+      TargetGroupARNs: 
+        - !GetAtt AlbTargetGroup.TargetGroupArn
+  AppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: t3.medium
+        SecurityGroupIds:
+          - !GetAtt AppSecurityGroup.GroupId
+        IamInstanceProfile: 
+          Arn: !GetAtt AppEc2InstanceProfile.Arn
+        BlockDeviceMappings: 
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: 20
+              DeleteOnTermination: true
+        MetadataOptions: 
+          HttpEndpoint: enabled
+          HttpProtocolIpv6: disabled
+          HttpPutResponseHopLimit: 1
+          HttpTokens: required
+          InstanceMetadataTags: enabled
+        KeyName: !Ref KeyPair
+        TagSpecifications: 
+          - ResourceType: instance
+            Tags: 
+              - Key: Name
+                Value: app
+        UserData:
+          # sudo tail -f /var/log/cloud-init-output.log
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            dnf update -yq
+            dnf install -yq git
+            dnf groupinstall -yq "Development Tools"
+
+            dnf install -yq nginx
+            systemctl enable --now nginx
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: app-ec2-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !GetAtt AlbSecurityGroup.GroupId
+        # - IpProtocol: tcp
+        #   FromPort: 80
+        #   ToPort: 80
+        #   CidrIp: !GetAtt Vpc.CidrBlock
+      Tags:
+        - Key: Name
+          Value: app-ec2-sg
+  AppEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+  AppEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref AppEc2IamRole
+  
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetc
+      SecurityGroups: 
+        - !Ref AlbSecurityGroup
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !GetAtt Alb.LoadBalancerArn
+      Port: 80
+      Protocol: HTTP
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !GetAtt AlbTargetGroup.TargetGroupArn
+  AlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 60
+      HealthCheckPath: /
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref Vpc
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: alb-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: alb-sg
+
+  Ecr:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: True

@@ -14,8 +14,8 @@ Custom Launch Template
 - AMI (optional)
 - InstanceType (optional)
 - Subnet(s) (optional)
-- SecurityGroup(s) (required)
-- UserData (empty(Auto) or mime-multipart(AL2023) or ...)
+- SecurityGroup(s) (optional)
+- UserData (empty(Auto) or mime-multipart(AL2023) or ...) (required if AMI is specified)
 - IamRole(InstanceProfile) (don't include)
 
 Managed Node Group - Merged User Data Example
