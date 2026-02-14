@@ -407,8 +407,6 @@ Resources:
 
           EOF
 
-          aws iam create-service-linked-role --aws-service-name spot.amazonaws.com || true
-
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
   VsCodeEc2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -788,6 +786,8 @@ Resources:
                 annotations:
                   alb.ingress.kubernetes.io/scheme: internet-facing
                   alb.ingress.kubernetes.io/target-type: ip
+                  alb.ingress.kubernetes.io/security-groups: ${AlbSecurityGroup}
+                  alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
               spec:
                 ingressClassName: alb
                 rules:
@@ -879,6 +879,74 @@ Resources:
       ClusterName: !Ref EksCluster
       PrincipalArn: !GetAtt VsCodePodRole.Arn
       Type: STANDARD
+  
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: vscode
+      Type: application
+      Scheme: internet-facing
+      Subnets: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetc
+      SecurityGroups:
+        - !GetAtt Vpc.DefaultSecurityGroup # Ignored
+      Tags: 
+        - Key: elbv2.k8s.aws/cluster
+          Value: !Ref EksCluster
+        - Key: ingress.k8s.aws/resource
+          Value: LoadBalancer
+        - Key: ingress.k8s.aws/stack
+          Value: default/vscode
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !GetAtt AlbTargetGroup.TargetGroupArn
+      LoadBalancerArn: !GetAtt Alb.LoadBalancerArn
+      Port: 80
+      Protocol: HTTP
+  AlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 15
+      HealthCheckPath: /
+      HealthCheckPort: 8080
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: 200-399
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref Vpc
+      Tags: 
+        - Key: elbv2.k8s.aws/cluster
+          Value: !Ref EksCluster
+        - Key: ingress.k8s.aws/resource
+          Value: default/vscode-vscode:8080
+        - Key: ingress.k8s.aws/stack
+          Value: default/vscode
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: alb-sg
+      SecurityGroupIngress:
+        - !If [SecurityGroupInboundFromAnywhere, {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": "0.0.0.0/0"
+          }, !Ref AWS::NoValue]
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: alb-sg
 
 Outputs:
   VsCode:
