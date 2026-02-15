@@ -202,8 +202,18 @@ Resources:
           sudo -Eu ec2-user bash << 'EOF'
           cd /home/ec2-user
           mkdir -p /home/ec2-user/python
-          echo 'FROM python:3.14-slim' > /home/ec2-user/python/Dockerfile
-          echo 'print("Hello World")' > /home/ec2-user/python/app.py
+          echo 'FROM python:3.14
+          WORKDIR /code
+          COPY ./requirements.txt /code/requirements.txt
+          RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
+          COPY ./main.py .
+          CMD ["fastapi", "run", "main.py", "--port", "80"]' > /home/ec2-user/python/Dockerfile
+          echo 'fastapi[standard]' > /home/ec2-user/python/requirements.txt
+          echo 'from fastapi import FastAPI
+          app = FastAPI()
+          @app.get("/")
+          def get():
+            return {"Status": "Healthy"}' > /home/ec2-user/python/main.py
           cd /home/ec2-user/python
           zip -r src.zip ./*
           aws s3 cp src.zip s3://${CodeCommitS3Bucket}
@@ -320,8 +330,8 @@ Resources:
                 - NEW_TAG=$(date "+%Y%m%d%H%M%S")
                 - |
                   cat > BUILD.md << EOF 
-                    codebuild: $BUILD_ID
-                    codepipeline: $EXECUTION_ID
+                  codebuild: $BUILD_ID
+                  codepipeline: $EXECUTION_ID
                   EOF
                 - docker build -t $IMAGE_REPO_URI:$NEW_TAG .
                 - docker push $IMAGE_REPO_URI:$NEW_TAG
@@ -329,10 +339,30 @@ Resources:
               commands:
                 - echo $CODEBUILD_BUILD_ID
                 - echo $EXECUTION_ID
+                - mkdir scripts
+                - |
+                  cat > scripts/start_server.sh << EOF
+                  #!/bin/bash
+                  docker rm -f \$(docker ps -aq) &> /dev/null
+                  docker system prune -af
+                  aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+                  docker pull $IMAGE_REPO_URI:$NEW_TAG
+                  docker run -d -p 5000:80 $IMAGE_REPO_URI:$NEW_TAG
+                  EOF
+                - |
+                  cat > appspec.yml << EOF
+                  version: 0.0
+                  os: linux
+                  hooks:
+                    ApplicationStart:
+                      - location: scripts/start_server.sh
+                  EOF
           artifacts:
             files:
+              - appspec.yml
+              - scripts/start_server.sh
               - BUILD.md
-            discard-paths: yes
+            discard-paths: no
       # https://docs.aws.amazon.com/codebuild/latest/userguide/sample-build-badges.html
       # BadgeEnabled: True / False
       # BuildBatchConfig: 
@@ -392,99 +422,111 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/PowerUserAccess
 
-  # CodeDeployDeploymentGroup:
-  #   Type: AWS::CodeDeploy::DeploymentGroup
-  #   Properties:
-  #     ApplicationName: !Ref CodeDeployApplication
-  #     ServiceRoleArn: String
-  #     AutoRollbackConfiguration: 
-  #       Enabled: False
-  #     AutoScalingGroups: 
-  #       - !Ref AppAutoScalingGroup
-  #     LoadBalancerInfo: 
-  #       ElbInfoList: 
-  #         - Name: String
-  #       TargetGroupInfoList: 
-  #         - Name: String
-  #       TargetGroupPairInfoList: 
-  #         - ProdTrafficRoute: 
-  #             ListenerArns: 
-  #               - String
-  #           TestTrafficRoute: 
-  #             ListenerArns: 
-  #             - String
-  #           TargetGroups: 
-  #             - Name: String
-  #       # Events: 
-  #       #   - DEPLOYMENT_FAILURE
-  #       #   - DEPLOYMENT_STOP_ON_ALARM
-  #       #   - DEPLOYMENT_STOP_ON_REQUEST
-  #     # BlueGreenDeploymentConfiguration: 
-  #     #   DeploymentReadyOption: 
-  #     #     ActionOnTimeout: String
-  #     #     WaitTimeInMinutes: Integer
-  #     #   GreenFleetProvisioningOption: 
-  #     #     Action: String
-  #     #   TerminateBlueInstancesOnDeploymentSuccess: 
-  #     #     Action: String
-  #     #     TerminationWaitTimeInMinutes: Integer
-  #     # DeploymentStyle: 
-  #     #   DeploymentOption: WITH_TRAFFIC_CONTROL | WITHOUT_TRAFFIC_CONTROL
-  #     #   DeploymentType: IN_PLACE | BLUE_GREEN
-  #     # Deployment: 
-  #     #   Description: String
-  #     #   IgnoreApplicationStopFailures: Boolean
-  #     #   Revision: 
-  #     #     GitHubLocation: 
-  #     #       CommitId: String
-  #     #       Repository: String
-  #     #     RevisionType: String
-  #     #     S3Location: 
-  #     #       Bucket: String
-  #     #       BundleType: String
-  #     #       ETag: String
-  #     #       Key: String
-  #     #       Version: String
-  #     # DeploymentConfigName: String
-  #     # Ec2TagFilters: 
-  #     #   - Key: String
-  #     #     Type: String
-  #     #     Value: String
-  #     # Ec2TagSet: 
-  #     #   Ec2TagSetList:
-  #     #     - Ec2TagGroup: 
-  #     #         - Key: String
-  #     #           Type: String
-  #     #           Value: String
-  #     # AlarmConfiguration: 
-  #     #   Alarms: 
-  #     #     - Name: String
-  #     #   Enabled: Boolean
-  #     #   IgnorePollAlarmFailure: Boolean
-  #     # ECSServices: 
-  #     #   - ClusterName: String
-  #     #     ServiceName: String
-  #     # OnPremisesInstanceTagFilters: 
-  #     #   - Key: String
-  #     #     Type: String
-  #     #     Value: String
-  #     # OnPremisesTagSet: 
-  #     #   OnPremisesTagSetList: 
-  #     #     - OnPremisesTagGroup: 
-  #     #         - Key: String
-  #     #           Type: String
-  #     #           Value: String
-  #     # OutdatedInstancesStrategy: String
-  #     # TerminationHookEnabled: Boolean
-  #     # TriggerConfigurations: 
-  #     #   - TriggerEvents: 
-  #     #       - String
-  #     #     TriggerName: String
-  #     #     TriggerTargetArn: String
-  # CodeDeployApplication:
-  #   Type: AWS::CodeDeploy::Application
-  #   Properties:
-  #     ComputePlatform: Server
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      ServiceRoleArn: !GetAtt CodeDeployIamRole.Arn
+      AutoRollbackConfiguration: 
+        Enabled: False
+      DeploymentConfigName: CodeDeployDefault.AllAtOnce
+      AutoScalingGroups: 
+        - !Ref AppAutoScalingGroup
+      LoadBalancerInfo: 
+        TargetGroupInfoList: 
+          - Name: !GetAtt AlbTargetGroup.TargetGroupName
+        # TargetGroupPairInfoList: 
+        #   - ProdTrafficRoute: 
+        #       ListenerArns: 
+        #         - String
+        #     TestTrafficRoute: 
+        #       ListenerArns: 
+        #       - String
+        #     TargetGroups: 
+        #       - Name: String
+        # Events: 
+        #   - DEPLOYMENT_FAILURE
+        #   - DEPLOYMENT_STOP_ON_ALARM
+        #   - DEPLOYMENT_STOP_ON_REQUEST
+      # BlueGreenDeploymentConfiguration: 
+      #   DeploymentReadyOption: 
+      #     ActionOnTimeout: String
+      #     WaitTimeInMinutes: Integer
+      #   GreenFleetProvisioningOption: 
+      #     Action: String
+      #   TerminateBlueInstancesOnDeploymentSuccess: 
+      #     Action: String
+      #     TerminationWaitTimeInMinutes: Integer
+      # DeploymentStyle: 
+      #   DeploymentOption: WITH_TRAFFIC_CONTROL | WITHOUT_TRAFFIC_CONTROL
+      #   DeploymentType: IN_PLACE | BLUE_GREEN
+      # Deployment: 
+      #   Description: String
+      #   IgnoreApplicationStopFailures: Boolean
+      #   Revision: 
+      #     GitHubLocation: 
+      #       CommitId: String
+      #       Repository: String
+      #     RevisionType: String
+      #     S3Location: 
+      #       Bucket: String
+      #       BundleType: String
+      #       ETag: String
+      #       Key: String
+      #       Version: String
+      # Ec2TagFilters: 
+      #   - Key: String
+      #     Type: String
+      #     Value: String
+      # Ec2TagSet: 
+      #   Ec2TagSetList:
+      #     - Ec2TagGroup: 
+      #         - Key: String
+      #           Type: String
+      #           Value: String
+      # AlarmConfiguration: 
+      #   Alarms: 
+      #     - Name: String
+      #   Enabled: Boolean
+      #   IgnorePollAlarmFailure: Boolean
+      # ECSServices: 
+      #   - ClusterName: String
+      #     ServiceName: String
+      # OnPremisesInstanceTagFilters: 
+      #   - Key: String
+      #     Type: String
+      #     Value: String
+      # OnPremisesTagSet: 
+      #   OnPremisesTagSetList: 
+      #     - OnPremisesTagGroup: 
+      #         - Key: String
+      #           Type: String
+      #           Value: String
+      # OutdatedInstancesStrategy: String
+      # TerminationHookEnabled: Boolean
+      # TriggerConfigurations: 
+      #   - TriggerEvents: 
+      #       - String
+      #     TriggerName: String
+      #     TriggerTargetArn: String
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ComputePlatform: Server
+  CodeDeployIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codedeploy.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
   
   AppAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -538,8 +580,21 @@ Resources:
             dnf install -yq git
             dnf groupinstall -yq "Development Tools"
 
-            dnf install -yq nginx
-            systemctl enable --now nginx
+            dnf install -yq git
+            dnf install -yq docker
+            systemctl enable --now docker
+            usermod -aG docker ec2-user
+            newgrp docker
+            
+            dnf install -yq ruby
+            dnf install -yq wget
+            cd /home/ec2-user
+            wget https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/latest/install
+            chmod +x ./install
+            ./install auto
+            systemctl status codedeploy-agent
+
+            docker run -d -p 5000:80 nginx
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -548,8 +603,8 @@ Resources:
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
+          FromPort: 5000
+          ToPort: 5000
           SourceSecurityGroupId: !GetAtt AlbSecurityGroup.GroupId
         # - IpProtocol: tcp
         #   FromPort: 80
@@ -603,12 +658,14 @@ Resources:
       HealthCheckEnabled: true
       HealthCheckIntervalSeconds: 60
       HealthCheckPath: /
-      HealthCheckPort: 80
+      HealthCheckPort: 5000
       HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: 200-399
       HealthCheckTimeoutSeconds: 10
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 2
-      Port: 80
+      Port: 5000
       Protocol: HTTP
       TargetType: instance
       VpcId: !Ref Vpc
@@ -619,10 +676,12 @@ Resources:
       GroupName: alb-sg
       VpcId: !Ref Vpc
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 80,
+          "ToPort": 80,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
       Tags:
         - Key: Name
           Value: alb-sg
@@ -631,3 +690,134 @@ Resources:
     Type: AWS::ECR::Repository
     Properties:
       EmptyOnDelete: True
+
+  # CodePipeline
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      PipelineType: V2
+      ExecutionMode: QUEUED
+      ArtifactStore:
+        Location: !Ref CodePipelineArtifactStoreS3Bucket
+        Type: S3
+      RoleArn: !GetAtt CodePipelineIamRole.Arn
+      Stages: 
+        - Name: SourceStage
+          Actions: 
+            - Name: SourceAction
+              ActionTypeId: 
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                PollForSourceChanges: false
+                RepositoryName: !GetAtt CodeCommit.Name
+                BranchName: main
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Namespace: SourceVariables
+          OnFailure:
+            Result: RETRY
+        - Name: BuildStage
+          Actions: 
+            - Name: BuildAction
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref CodeBuild
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              Namespace: BuildVariables
+          OnFailure:
+            Result: RETRY
+        - Name: DeployStage
+          Actions: 
+            - Name: DeployAction
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeploy
+                Version: 1
+              Configuration:
+                ApplicationName: !Ref CodeDeployApplication
+                DeploymentGroupName: !Ref CodeDeployDeploymentGroup
+              InputArtifacts:
+                - Name: BuildArtifact
+              Namespace: DeployVariables
+          OnFailure:
+            Result: RETRY
+  CodePipelineArtifactStoreS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+  CodePipelineIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+  CloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: >-
+        Amazon CloudWatch Events rule to automatically start your pipeline when a change occurs in the AWS CodeCommit source repository and branch. 
+        Deleting this may prevent changes from being detected in that pipeline. 
+        Read more: http://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-about-starting.html
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources: 
+          - !GetAtt CodeCommit.Arn
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - main
+      State: ENABLED
+      Targets:
+        - Id: codepipeline-codepipeline
+          Arn: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}"
+          RoleArn: !GetAtt CloudWatchEventRuleIamRole.Arn
+  CloudWatchEventRuleIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: start-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource:
+                  - !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}"

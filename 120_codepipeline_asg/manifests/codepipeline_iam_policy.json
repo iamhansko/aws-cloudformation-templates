@@ -1,0 +1,100 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowS3BucketAccess",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetBucketVersioning",
+                "s3:GetBucketAcl",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": [
+                "arn:aws:s3:::${CodePipelineArtifactStoreS3Bucket}"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "aws:ResourceAccount": "${AWS::AccountId}"
+                }
+            }
+        },
+        {
+            "Sid": "AllowS3ObjectAccess",
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:PutObjectAcl",
+                "s3:GetObject",
+                "s3:GetObjectVersion"
+            ],
+            "Resource": [
+                "arn:aws:s3:::${CodePipelineArtifactStoreS3Bucket}/*"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "aws:ResourceAccount": "${AWS::AccountId}"
+                }
+            }
+        },
+        {
+            "Action": [
+                "codebuild:BatchGetBuilds",
+                "codebuild:StartBuild",
+                "codebuild:BatchGetBuildBatches",
+                "codebuild:StartBuildBatch"
+            ],
+            "Resource": [
+                "${CodeBuild.Arn}"
+            ],
+            "Effect": "Allow"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "codecommit:CancelUploadArchive",
+                "codecommit:GetBranch",
+                "codecommit:GetCommit",
+                "codecommit:GetRepository",
+                "codecommit:GetUploadArchiveStatus",
+                "codecommit:UploadArchive"
+            ],
+            "Resource": [
+                "${CodeCommit.Arn}"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "codedeploy:CreateDeployment",
+                "codedeploy:GetApplication",
+                "codedeploy:GetDeployment",
+                "codedeploy:RegisterApplicationRevision",
+                "codedeploy:ListDeployments",
+                "codedeploy:ListDeploymentGroups",
+                "codedeploy:GetDeploymentGroup"
+            ],
+            "Resource": [
+                "arn:aws:codedeploy:*:${AWS::AccountId}:application:${CodeDeployApplication}",
+                "arn:aws:codedeploy:*:${AWS::AccountId}:deploymentgroup:${CodeDeployApplication}/*"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "codedeploy:GetDeploymentConfig"
+            ],
+            "Resource": [
+                "arn:aws:codedeploy:*:${AWS::AccountId}:deploymentconfig:CodeDeployDefault.AllAtOnce"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "codedeploy:ListDeploymentConfigs"
+            ],
+            "Resource": [
+                "*"
+            ]
+        }
+    ]
+}
