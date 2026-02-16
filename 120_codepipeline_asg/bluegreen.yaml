@@ -213,7 +213,7 @@ Resources:
           app = FastAPI()
           @app.get("/")
           def get():
-            return {"Deployment": "In-place"}' > /home/ec2-user/python/main.py
+            return {"Deployment": "Blue"}' > /home/ec2-user/python/main.py
           cd /home/ec2-user/python
           zip -r src.zip ./*
           aws s3 cp src.zip s3://${CodeCommitS3Bucket}
@@ -427,6 +427,9 @@ Resources:
     Properties:
       ApplicationName: !Ref CodeDeployApplication
       ServiceRoleArn: !GetAtt CodeDeployIamRole.Arn
+      DeploymentStyle: 
+        DeploymentOption: WITH_TRAFFIC_CONTROL # or WITHOUT_TRAFFIC_CONTROL
+        DeploymentType: BLUE_GREEN # or IN_PLACE
       AutoRollbackConfiguration: 
         Enabled: False
       DeploymentConfigName: CodeDeployDefault.AllAtOnce
@@ -435,31 +438,19 @@ Resources:
       LoadBalancerInfo: 
         TargetGroupInfoList: 
           - Name: !GetAtt AlbTargetGroup.TargetGroupName
-        # TargetGroupPairInfoList: 
-        #   - ProdTrafficRoute: 
-        #       ListenerArns: 
-        #         - String
-        #     TestTrafficRoute: 
-        #       ListenerArns: 
-        #       - String
-        #     TargetGroups: 
-        #       - Name: String
         # Events: 
         #   - DEPLOYMENT_FAILURE
         #   - DEPLOYMENT_STOP_ON_ALARM
         #   - DEPLOYMENT_STOP_ON_REQUEST
-      # BlueGreenDeploymentConfiguration: 
-      #   DeploymentReadyOption: 
-      #     ActionOnTimeout: String
-      #     WaitTimeInMinutes: Integer
-      #   GreenFleetProvisioningOption: 
-      #     Action: String
-      #   TerminateBlueInstancesOnDeploymentSuccess: 
-      #     Action: String
-      #     TerminationWaitTimeInMinutes: Integer
-      # DeploymentStyle: 
-      #   DeploymentOption: WITH_TRAFFIC_CONTROL | WITHOUT_TRAFFIC_CONTROL
-      #   DeploymentType: IN_PLACE | BLUE_GREEN
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption:
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+          WaitTimeInMinutes: 0
+        GreenFleetProvisioningOption:
+          Action: COPY_AUTO_SCALING_GROUP
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: 0
       # Deployment: 
       #   Description: String
       #   IgnoreApplicationStopFailures: Boolean
@@ -543,9 +534,9 @@ Resources:
   AppAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      MinSize: 3
-      DesiredCapacity: 3
-      MaxSize: 6
+      MinSize: 1
+      DesiredCapacity: 1
+      MaxSize: 2
       LaunchTemplate: 
         LaunchTemplateId: !Ref AppLaunchTemplate
         Version: 1
@@ -665,9 +656,6 @@ Resources:
   AlbTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      TargetGroupAttributes:
-        - Key: deregistration_delay.timeout_seconds
-          Value: 30
       HealthCheckEnabled: true
       HealthCheckIntervalSeconds: 60
       HealthCheckPath: /
