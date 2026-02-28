@@ -440,12 +440,12 @@ Resources:
               - sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
-  # EksOidcProvider:
-  #   Type: AWS::IAM::OIDCProvider
-  #   Properties:
-  #     Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
-  #     ClientIdList: 
-  #       - sts.amazonaws.com
+  EksOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList: 
+        - sts.amazonaws.com
   VpcCniAddOn:
     Type: AWS::EKS::Addon
     Properties:
@@ -464,25 +464,37 @@ Resources:
       AddonName: coredns
       ClusterName: !Ref EksCluster
       ResolveConflicts: OVERWRITE
-  PodIdentityAgentAddon:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: eks-pod-identity-agent
-      ClusterName: !Ref EksCluster
-      ResolveConflicts: OVERWRITE
+  # PodIdentityAgentAddon:
+  #   Type: AWS::EKS::Addon
+  #   Properties:
+  #     AddonName: eks-pod-identity-agent
+  #     ClusterName: !Ref EksCluster
+  #     ResolveConflicts: OVERWRITE
   AwsLoadBalancerControllerRole:
     # https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
     Type: AWS::IAM::Role
     Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: pods.eks.amazonaws.com
-            Action:
-              - sts:AssumeRole
-              - sts:TagSession
+      AssumeRolePolicyDocument: !Sub
+        - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Effect": "Allow",
+                      "Principal": {
+                          "Federated": "${EksOidcProvider.Arn}"
+                      },
+                      "Action": "sts:AssumeRoleWithWebIdentity",
+                      "Condition": {
+                          "StringEquals": {
+                              "${OidcProvider}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller",
+                              "${OidcProvider}:aud": "sts.amazonaws.com"
+                          }
+                      }
+                  }
+              ]
+            }
+        - OidcProvider: !Select [1, !Split ['//', !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
       Policies:
         - PolicyName: AWSLoadBalancerControllerPolicy
           PolicyDocument:
@@ -520,13 +532,6 @@ Resources:
                   - shield:CreateProtection
                   - shield:DeleteProtection
                 Resource: "*"
-  AwsLoadBalancerControllerRolePodIdentityAssociation:
-    Type: AWS::EKS::PodIdentityAssociation
-    Properties:
-      ClusterName: !Ref EksCluster
-      Namespace: kube-system
-      RoleArn: !GetAtt AwsLoadBalancerControllerRole.Arn
-      ServiceAccount: aws-load-balancer-controller
   VsCodeEc2IamAccessEntry:
     Type: AWS::EKS::AccessEntry
     Properties:
