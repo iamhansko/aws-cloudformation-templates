@@ -1,1 +1,1 @@
-# EKS Kube Resource Orchestrator
+# EKS Capabilities
