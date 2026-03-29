@@ -2,10 +2,6 @@ Parameters:
   SourceAccountId:
     Description: Target Account ID
     Type: String
-  SourceAccountRepository:
-    Description: Target Account CodeCommit Repository
-    Type: String
-    Default: "a-repo"
 
 Resources:
   CodeCommitRepository:
