@@ -12,6 +12,13 @@ Parameters:
     Description: https://github.com/coder/code-server/releases
     Type: String
     Default: "4.109.5"
+  TargetAccountId:
+    Description: Target Account ID
+    Type: String
+  TargetAccountRepository:
+    Description: Target Account CodeCommit Repository
+    Type: String
+    Default: "b-repo"
 Conditions:
   SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
 
@@ -42,6 +49,286 @@ Resources:
   CodeCommitS3Bucket:
     Type: AWS::S3::Bucket
   
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: git-remote-codecommit-build
+      Artifacts: 
+        Type: CODEPIPELINE
+      Cache: 
+        Type: LOCAL
+        Modes: 
+          - LOCAL_SOURCE_CACHE
+      ConcurrentBuildLimit: 6
+      Environment: 
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: True
+      ServiceRole: !GetAtt CodeBuildIamRole.Arn
+      TimeoutInMinutes: 5
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            variables:
+              AWS_ACCOUNT_ID: ${AWS::AccountId}
+          phases:
+            pre_build:
+              commands:
+                - ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime
+                - curl -O https://bootstrap.pypa.io/get-pip.py
+                - python3 get-pip.py --user
+                - pip install git-remote-codecommit
+            build:
+              commands:
+                - BUILD_ID=$(echo $CODEBUILD_BUILD_ID | cut -d':' -f2)
+                - cd ..
+                - aws sts get-caller-identity
+                - eval $(aws sts assume-role --role-arn arn:aws:iam::${TargetAccountId}:role/CrossAccountRole --role-session-name codebuild --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text | awk '{print "export AWS_ACCESS_KEY_ID="$1" AWS_SECRET_ACCESS_KEY="$2" AWS_SESSION_TOKEN="$3}')
+                - aws sts get-caller-identity
+                - git clone codecommit::${AWS::Region}://${TargetAccountRepository}
+                - cp -r ./src/* ./${TargetAccountRepository}
+                - cd ${TargetAccountRepository}
+                - git config --global user.email "$AWS_ACCOUNT_ID@codebuild.com"
+                - git config --global user.name "codebuild-$AWS_ACCOUNT_ID"
+                - git add .
+                - git status
+                - git commit -m "Build ID - $BUILD_ID"
+                - git push
+            post_build:
+              commands:
+                - |
+                  cat > ../src/BUILD.md << EOF 
+                  ## codebuild: $BUILD_ID
+                  ## codepipeline: $EXECUTION_ID
+                  EOF
+                - echo $CODEBUILD_BUILD_ID
+                - echo $EXECUTION_ID
+          artifacts:
+            files:
+              - BUILD.md
+            discard-paths: no
+  CodeBuildIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CodeBuildRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies: 
+        - PolicyName: CrossAccountPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: !Sub arn:aws:iam::${TargetAccountId}:role/CrossAccountRole
+          # https://docs.aws.amazon.com/ko_kr/codebuild/latest/userguide/setting-up-service-role.html
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: 2012-10-17	 	 	 
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - codecommit:GitPull
+                Resource: !GetAtt CodeCommitRepository.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource: !GetAtt CodePipelineArtifactStoreS3Bucket.Arn
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Ref AWS::AccountId
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub ${CodePipelineArtifactStoreS3Bucket.Arn}/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Ref AWS::AccountId
+  
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      PipelineType: V2
+      ExecutionMode: QUEUED
+      ArtifactStore:
+        Location: !Ref CodePipelineArtifactStoreS3Bucket
+        Type: S3
+      RoleArn: !GetAtt CodePipelineIamRole.Arn
+      Stages: 
+        - Name: SourceStage
+          Actions: 
+            - Name: SourceAction
+              ActionTypeId: 
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                PollForSourceChanges: false
+                RepositoryName: !GetAtt CodeCommitRepository.Name
+                BranchName: main
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Namespace: SourceVariables
+          OnFailure:
+            Result: RETRY
+        - Name: BuildStage
+          Actions: 
+            - Name: BuildAction
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              Namespace: BuildVariables
+          OnFailure:
+            Result: RETRY
+  CodePipelineArtifactStoreS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+  CodePipelineIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: S3Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource: !GetAtt CodePipelineArtifactStoreS3Bucket.Arn
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Ref AWS::AccountId
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub ${CodePipelineArtifactStoreS3Bucket.Arn}/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Ref AWS::AccountId
+        - PolicyName: CodeCommitPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codecommit:CancelUploadArchive
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetRepository
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                Resource: !GetAtt CodeCommitRepository.Arn
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuildBatches
+                  - codebuild:StartBuildBatch
+                Resource: !GetAtt CodeBuildProject.Arn
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Ref AWS::AccountId
+  CloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: >-
+        Amazon CloudWatch Events rule to automatically start your pipeline when a change occurs in the AWS CodeCommit source repository and branch. 
+        Deleting this may prevent changes from being detected in that pipeline. 
+        Read more: http://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-about-starting.html
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources: 
+          - !GetAtt CodeCommitRepository.Arn
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - main
+      State: ENABLED
+      Targets:
+        - Id: codepipeline-codepipeline
+          Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+          RoleArn: !GetAtt CloudWatchEventRuleIamRole.Arn
+  CloudWatchEventRuleIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: start-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource:
+                  - !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+
   KeyPair:
     Type: AWS::EC2::KeyPair
     Properties:
@@ -58,8 +345,6 @@ Resources:
       Tags:
         - Key: Name
           Value: vpc
-
-  # PublicSubnets
   Fn::ForEach::PublicSubnets:
     - Az
     - [a, c]
@@ -105,58 +390,6 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
       RouteTableId: !Ref PublicSubnetRouteTable
-  
-  # PrivateSubnets
-  # Fn::ForEach::PrivateSubnets:
-  #   - Az
-  #   - [a, c]
-  #   - PrivateSubnet${Az}:
-  #       Type: AWS::EC2::Subnet
-  #       Properties:
-  #         VpcId: !Ref Vpc
-  #         CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
-  #         AvailabilityZone: !Sub ${AWS::Region}${Az}
-  #         Tags:
-  #           - Key: Name
-  #             Value: !Sub private-subnet-${Az}
-  #     NatgatewayElasticIp${Az}:
-  #       Type: AWS::EC2::EIP
-  #     PrivateSubnet${Az}RouteTableAssociation:
-  #       Type: AWS::EC2::SubnetRouteTableAssociation
-  #       Properties:
-  #         RouteTableId: !Ref PrivateSubnetRouteTable
-  #         SubnetId:
-  #           Ref: !Sub PrivateSubnet${Az}
-  # PrivateSubnetRouteTable:
-  #   Type: AWS::EC2::RouteTable
-  #   Properties:
-  #     VpcId: !Ref Vpc
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Sub private-rt
-  # PrivateSubnetRoute:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     DestinationCidrBlock: 0.0.0.0/0
-  #     NatGatewayId: !Ref NatGateway
-  #     RouteTableId: !Ref PrivateSubnetRouteTable
-  # NatGateway:
-  #   Type: AWS::EC2::NatGateway
-  #   DependsOn:
-  #     - VpcInternetGatewayAttachment
-  #   Properties:
-  #     VpcId: !Ref Vpc
-  #     AvailabilityMode: regional
-  #     AvailabilityZoneAddresses:
-  #       - AvailabilityZone: !Sub ${AWS::Region}a
-  #         AllocationIds: 
-  #           - !GetAtt NatgatewayElasticIpa.AllocationId
-  #       - AvailabilityZone: !Sub ${AWS::Region}c
-  #         AllocationIds: 
-  #           - !GetAtt NatgatewayElasticIpc.AllocationId
-  #     Tags: 
-  #       - Key : Name
-  #         Value : !Sub regional-natgw
   
   VsCodeEc2:
     Type: AWS::EC2::Instance

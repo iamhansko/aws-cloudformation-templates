@@ -1,5 +1,48 @@
+Parameters:
+  SourceAccountId:
+    Description: Target Account ID
+    Type: String
+  SourceAccountRepository:
+    Description: Target Account CodeCommit Repository
+    Type: String
+    Default: "a-repo"
+
 Resources:
   CodeCommitRepository:
     Type: AWS::CodeCommit::Repository
     Properties:
       RepositoryName: b-repo
+  
+  CrossAccountIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CrossAccountRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${SourceAccountId}:root
+            Action:
+              - sts:AssumeRole
+      Policies: 
+        - PolicyName: CrossAccountPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  # - codecommit:BatchGet*
+                  # - codecommit:Create*
+                  # - codecommit:DeleteBranch
+                  # - codecommit:Get*
+                  # - codecommit:List*
+                  # - codecommit:Describe*
+                  # - codecommit:Put*
+                  # - codecommit:Post*
+                  # - codecommit:Merge*
+                  # - codecommit:Test*
+                  # - codecommit:Update*
+                  - codecommit:GitPull
+                  - codecommit:GitPush
+                Resource: !GetAtt CodeCommitRepository.Arn
