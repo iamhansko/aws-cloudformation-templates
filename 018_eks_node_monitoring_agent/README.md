@@ -68,3 +68,6 @@ sudo chmod +x /usr/sbin/xfs_db
 
 xfs_db -r -c "freesp -s" /dev/nvme0n1p1
 ```
+
+## References
+- [GitHub Repository](https://github.com/aws/eks-node-monitoring-agent)
