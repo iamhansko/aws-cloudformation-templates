@@ -1,0 +1,154 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: aws-efs-csi-driver
+  name: efs-csi-controller
+  namespace: kube-system
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 2
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: efs-csi-controller
+      app.kubernetes.io/instance: aws-efs-csi-driver
+      app.kubernetes.io/name: aws-efs-csi-driver
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: efs-csi-controller
+        app.kubernetes.io/instance: aws-efs-csi-driver
+        app.kubernetes.io/name: aws-efs-csi-driver
+    spec:
+      containers:
+      - args:
+        - --endpoint=$(CSI_ENDPOINT)
+        - --logtostderr
+        - --v=2
+        - --delete-access-point-root-dir=false
+        env:
+        - name: CSI_ENDPOINT
+          value: unix:///var/lib/csi/sockets/pluginproxy/csi.sock
+        - name: AWS_DEFAULT_REGION
+          value: us-east-1
+        - name: AWS_REGION
+          value: us-east-1
+        - name: CSI_NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        - name: PORT_RANGE_UPPER_BOUND
+          value: "21049"
+        image: 602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/aws-efs-csi-driver:v2.3.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 5
+          httpGet:
+            path: /healthz
+            port: healthz
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 3
+        name: efs-plugin
+        ports:
+        - containerPort: 9909
+          name: healthz
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+        securityContext:
+          privileged: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /var/lib/csi/sockets/pluginproxy/
+          name: socket-dir
+      - args:
+        - --csi-address=$(ADDRESS)
+        - --v=2
+        - --feature-gates=Topology=true
+        - --extra-create-metadata
+        - --leader-election
+        - --leader-election-renew-deadline=10s
+        - --leader-election-lease-duration=15s
+        - --worker-threads=100
+        - --timeout=15s
+        env:
+        - name: ADDRESS
+          value: /var/lib/csi/sockets/pluginproxy/csi.sock
+        image: 602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/csi-provisioner:v6.1.0-eksbuild.2
+        imagePullPolicy: IfNotPresent
+        name: csi-provisioner
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /var/lib/csi/sockets/pluginproxy/
+          name: socket-dir
+      - args:
+        - --csi-address=/csi/csi.sock
+        - --health-port=9909
+        image: 602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/livenessprobe:v2.17.0-eksbuild.3
+        imagePullPolicy: IfNotPresent
+        name: liveness-probe
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /csi
+          name: socket-dir
+      dnsPolicy: ClusterFirst
+      nodeSelector:
+        kubernetes.io/os: linux
+      priorityClassName: system-cluster-critical
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 0
+        runAsGroup: 0
+        runAsNonRoot: false
+        runAsUser: 0
+      serviceAccount: efs-csi-controller-sa
+      serviceAccountName: efs-csi-controller-sa
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - key: efs.csi.aws.com/agent-not-ready
+        operator: Exists
+      volumes:
+      - emptyDir: {}
+        name: socket-dir
