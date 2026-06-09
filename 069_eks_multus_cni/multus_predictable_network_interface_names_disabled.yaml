@@ -247,14 +247,14 @@ Resources:
             echo 'apiVersion: "k8s.cni.cncf.io/v1"
             kind: NetworkAttachmentDefinition
             metadata:
-              name: ens6-nad
+              name: eth1-nad
             spec:
               config: |
                 {
                   "cniVersion": "0.3.1",
-                  "name": "ens6-nad",
+                  "name": "eth1-nad",
                   "type": "ipvlan",
-                  "master": "ens6",
+                  "master": "eth1",
                   "mode": "l3",
                   "ipam": {
                     "type": "host-local",
@@ -279,7 +279,7 @@ Resources:
               template:
                 metadata:
                   annotations:
-                    k8s.v1.cni.cncf.io/networks: ens6-nad
+                    k8s.v1.cni.cncf.io/networks: eth1-nad
                   labels:
                     app: multi-homed
                 spec:
@@ -538,7 +538,7 @@ Resources:
 
               subnetipv6Cidr=`aws ec2 describe-subnets --region $region --subnet-ids $subnetId --query "Subnets[*].Ipv6CidrBlockAssociationSet[*].Ipv6CidrBlock" --output text`
               if [ -n "$subnetipv6Cidr" ]; then
-                eni=$(aws ec2 create-network-interface --region $region --subnet-id $subnetId --description "ens$((n+6))" --groups $sgId --ipv6-address-count 1 \
+                eni=$(aws ec2 create-network-interface --region $region --subnet-id $subnetId --description "eth$((n+1))" --groups $sgId --ipv6-address-count 1 \
                 --tag-specifications "ResourceType="network-interface",Tags=[{Key="node.k8s.amazonaws.com/no_manage",Value="true"}]" | jq -r '.NetworkInterface.NetworkInterfaceId, .NetworkInterface.PrivateIpAddresses[0].PrivateIpAddress')
               else
                 eni=$(aws ec2 create-network-interface --region $region --subnet-id $subnetId --description "eth$((n+1))" --groups $sgId \
@@ -561,10 +561,13 @@ Resources:
               echo "net.ipv4.conf.default.rp_filter = 0" | tee -a /etc/sysctl.conf
               echo "net.ipv4.conf.all.rp_filter = 0" | tee -a /etc/sysctl.conf
               sysctl -p
+              sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=\"/&net.ifnames=0 biosdevname=0 /" /etc/default/grub
+              grub2-mkconfig -o /boot/grub2/grub.cfg
 
+              rm -f /etc/eks/nodeadm/udev-net-manager/$INSTANCE_ID/ens*
               ENI_COUNT=$(echo $subnetListAZ1 | wc -w)
               for ((i = 0; i < ENI_COUNT; i++)); do
-                echo "cni" > "/etc/eks/nodeadm/udev-net-manager/$INSTANCE_ID/ens$((i + 6))"
+                echo "cni" > "/etc/eks/nodeadm/udev-net-manager/$INSTANCE_ID/eth$((i + 1))"
               done
 
               reboot
