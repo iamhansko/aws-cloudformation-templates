@@ -523,7 +523,7 @@ Resources:
               #!/bin/bash
               set -o xtrace
 
-              subnetListAZ1="${PrivateSubneta} ${PrivateSubneta} ${PrivateSubneta}"
+              subnetListAZ1="${PrivateSubneta} ${PrivateSubneta}"
               sgListAZ1="${EksCluster.ClusterSecurityGroupId} ${EksCluster.ClusterSecurityGroupId} ${EksCluster.ClusterSecurityGroupId}"
 
               TOKEN=`curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"`
@@ -538,15 +538,15 @@ Resources:
 
               subnetipv6Cidr=`aws ec2 describe-subnets --region $region --subnet-ids $subnetId --query "Subnets[*].Ipv6CidrBlockAssociationSet[*].Ipv6CidrBlock" --output text`
               if [ -n "$subnetipv6Cidr" ]; then
-                eni=$(aws ec2 create-network-interface --region $region --subnet-id $subnetId --description "eth$((n+1))" --groups $sgId --ipv6-address-count 1 \
+                eni=$(aws ec2 create-network-interface --region $region --subnet-id $subnetId --description "Multus" --groups $sgId --ipv6-address-count 1 \
                 --tag-specifications "ResourceType="network-interface",Tags=[{Key="node.k8s.amazonaws.com/no_manage",Value="true"}]" | jq -r '.NetworkInterface.NetworkInterfaceId, .NetworkInterface.PrivateIpAddresses[0].PrivateIpAddress')
               else
-                eni=$(aws ec2 create-network-interface --region $region --subnet-id $subnetId --description "eth$((n+1))" --groups $sgId \
+                eni=$(aws ec2 create-network-interface --region $region --subnet-id $subnetId --description "Multus" --groups $sgId \
                 --tag-specifications "ResourceType="network-interface",Tags=[{Key="node.k8s.amazonaws.com/no_manage",Value="true"}]" | jq -r '.NetworkInterface.NetworkInterfaceId, .NetworkInterface.PrivateIpAddresses[0].PrivateIpAddress')
               fi
 
               eniId=`echo $eni | cut -d' ' -f 1`
-              attachmentId=$(aws ec2 attach-network-interface --region $region --network-interface-id $eniId --instance-id $INSTANCE_ID --device-index $((n+2)) | jq -r '.AttachmentId')
+              attachmentId=$(aws ec2 attach-network-interface --region $region --network-interface-id $eniId --instance-id $INSTANCE_ID --device-index $((n+1)) | jq -r '.AttachmentId')
               aws ec2 modify-network-interface-attribute --region $region --network-interface-id $eniId --no-source-dest-check
               aws ec2 modify-network-interface-attribute --region $region --attachment "AttachmentId"="$attachmentId","DeleteOnTermination"="True" --network-interface-id $eniId
               }
