@@ -13,10 +13,10 @@
 Custom Launch Template
 - AMI (optional)
 - InstanceType (optional)
-- Subnet(s) (optional)
 - SecurityGroup(s) (optional)
 - UserData (empty(Auto) or mime-multipart(AL2023) or ...) (required if AMI is specified)
-- IamRole(InstanceProfile) (don't include)
+- Subnet(s) ([don't include](https://docs.aws.amazon.com/ko_kr/eks/latest/userguide/launch-templates.html#launch-template-basics))
+- IamRole(InstanceProfile) ([don't include](https://docs.aws.amazon.com/ko_kr/eks/latest/userguide/launch-templates.html#launch-template-basics))
 
 Managed Node Group - Merged User Data Example
 ```
