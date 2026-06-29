@@ -38,7 +38,7 @@ Resources:
       AvailabilityZone: !Sub ${AWS::Region}c
       InstanceCount: 1
       InstancePlatform: Linux/UNIX
-      InstanceType: t3.xlarge # https://aws.amazon.com/ko/ec2/instance-types/g4/#dnb0d6s
+      InstanceType: g4dn.xlarge # https://aws.amazon.com/ko/ec2/instance-types/g4/#dnb0d6s
   
   KeyPair:
     Type: AWS::EC2::KeyPair
