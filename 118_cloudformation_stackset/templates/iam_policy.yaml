@@ -1,0 +1,22 @@
+Parameters:
+  AllowedSourceIpAddresses:
+    Type: CommaDelimitedList
+    Description: Source IP Addresses
+    Default: 100.0.0.11,100.0.0.12
+
+Resources:
+  DenyAllIamPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: DenyAll
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Deny
+            Action: "*"
+            Resource: "*"
+            Condition:
+              NotIpAddress:
+                aws:SourceIp: !Ref AllowedSourceIpAddresses
+              Bool:
+                aws:ViaAWSService: "false"

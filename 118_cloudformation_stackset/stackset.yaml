@@ -1,0 +1,108 @@
+Resources:
+  StackSet:
+    Type: AWS::CloudFormation::StackSet
+    Properties:
+      StackSetName: AccessPolicy
+      AdministrationRoleARN: !GetAtt AdminAccountIamRole.Arn
+      ExecutionRoleName: AWSCloudFormationStackSetExecutionRole
+      Capabilities: 
+        - CAPABILITY_IAM
+        - CAPABILITY_NAMED_IAM
+        - CAPABILITY_AUTO_EXPAND
+      # AutoDeployment: 
+      #   DependsOn: 
+      #     - String
+      #   Enabled: true
+      #   RetainStacksOnAccountRemoval: false
+      # CallAs: SELF # DELEGATED_ADMIN
+      # ManagedExecution: 
+      #   Active: false
+      # OperationPreferences:
+      #   FailureToleranceCount: 0
+      #   FailureTolerancePercentage: Integer
+      #   MaxConcurrentCount: 1
+      #   MaxConcurrentPercentage: Integer
+      #   ConcurrencyMode: STRICT_FAILURE_TOLERANCE # SOFT_FAILURE_TOLERANCE
+      #   RegionConcurrencyType: SEQUENTIAL # PARALLEL
+      #   RegionOrder: 
+      #     - String
+      PermissionModel: SELF_MANAGED # SERVICE_MANAGED
+      Tags: 
+        - Key: foo
+          Value: bar
+      Parameters: 
+        - ParameterKey: AllowedSourceIpAddresses
+          ParameterValue: 192.0.0.101,192.0.0.102
+      StackInstancesGroup: 
+        - DeploymentTargets:
+            Accounts: 
+              - !Ref AWS::AccountId
+            # AccountFilterType: String
+            # AccountsUrl: String
+            # OrganizationalUnitIds: 
+            #   - String
+          ParameterOverrides: 
+            - ParameterKey: AllowedSourceIpAddresses
+              ParameterValue: 100.0.0.11,100.0.0.12,100.0.0.13,100.0.0.14
+          Regions: 
+            - !Ref AWS::Region
+      TemplateBody: |
+        Parameters:
+          AllowedSourceIpAddresses:
+            Type: CommaDelimitedList
+            Description: Source IP Addresses
+            Default: 100.0.0.11,100.0.0.12
+        Resources:
+          DenyAllIamPolicy:
+            Type: AWS::IAM::ManagedPolicy
+            Properties:
+              ManagedPolicyName: DenyAll
+              PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                  - Effect: Deny
+                    Action: "*"
+                    Resource: "*"
+                    Condition:
+                      NotIpAddress:
+                        aws:SourceIp: !Ref AllowedSourceIpAddresses
+                      Bool:
+                        aws:ViaAWSService: "false"
+
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stacksets-prereqs-self-managed.html
+  AdminAccountIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWSCloudFormationStackSetAdministrationRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: AssumeRole-AWSCloudFormationStackSetExecutionRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - !Sub arn:*:iam::*:role/${TargetAccountIamRole}
+  TargetAccountIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWSCloudFormationStackSetExecutionRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref AWS::AccountId
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
