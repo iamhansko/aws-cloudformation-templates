@@ -1,0 +1,133 @@
+Parameters:
+  CloudFormationIamRoleName:
+    Type: String
+    Description: CloudFormation IAM Role Name
+    Default: CloudFormationIamRole
+    AllowedPattern: .+
+    ConstraintDescription: CloudFormationIamRoleName must not be empty
+  CloudFormationAccountId:
+    Type: String
+    Description: CloudFormation AWS Account ID
+    AllowedPattern: ^\d{12}$
+    ConstraintDescription: CloudFormationAccountId must be a 12-digit number
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub
+        - cloudformation-templates-${AWS::StackName}-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowGetObject",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": "arn:${AWS::Partition}:iam::${CloudFormationAccountId}:role/${CloudFormationIamRoleName}"
+              },
+              "Action": [
+                "s3:GetObject",
+                "s3:GetObjectVersion"
+              ],
+              "Resource": "arn:${AWS::Partition}:s3:::${S3Bucket}/*"
+            },
+            {
+              "Sid": "AllowGetBucketLocation",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": "arn:${AWS::Partition}:iam::${CloudFormationAccountId}:role/${CloudFormationIamRoleName}"
+              },
+              "Action": "s3:GetBucketLocation",
+              "Resource": "arn:${AWS::Partition}:s3:::${S3Bucket}"
+            }
+          ]
+        }
+
+  UploadTemplate:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+      S3Bucket: !Ref S3Bucket
+      S3ObjectKey: template.yaml
+      TemplateBody: |
+        Resources:
+          Vpc:
+            Type: AWS::EC2::VPC
+            Properties:
+              CidrBlock: 10.0.0.0/16
+              EnableDnsSupport: true
+              EnableDnsHostnames: true
+              Tags:
+                - Key: Name
+                  Value: new-vpc
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.14
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt LambdaIamRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import cfnresponse
+          import boto3
+
+          s3 = boto3.client("s3")
+
+          def handler(event, context):
+            print(f"Event : {json.dumps(event)}")
+            response_data = {}
+
+            try:
+              request_type = event["RequestType"]
+              s3_bucket = event["ResourceProperties"]["S3Bucket"]
+              s3_object_key = event["ResourceProperties"]["S3ObjectKey"]
+              template_body = event["ResourceProperties"]["TemplateBody"]
+
+              if request_type in ("Create", "Update"):
+                s3.put_object(Bucket=s3_bucket, Key=s3_object_key, Body=template_body.encode("utf-8"))
+                response_data["Message"] = "Custom Resource Created/Updated"
+              elif request_type == "Delete":
+                s3.delete_object(Bucket=s3_bucket, Key=s3_object_key)
+                response_data["Message"] = "Custom Resource Deleted"
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+            except Exception as e:
+              response_data["Reason"] = str(e)
+              cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+  LambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3TemplateUpload
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${S3Bucket}/*
+
+Outputs:
+  S3BucketName:
+    Description: Template S3 Bucket Name
+    Value: !Ref S3Bucket

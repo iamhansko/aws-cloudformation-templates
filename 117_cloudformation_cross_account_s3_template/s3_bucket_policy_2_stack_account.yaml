@@ -1,0 +1,27 @@
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: Template S3 Bucket Name
+    Default: CloudFormationIamRole
+    AllowedPattern: .+
+    ConstraintDescription: S3BucketName must not be empty
+
+Resources:
+  CloudFormationIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+Outputs:
+  CreateStackCommand:
+    Description: CloudFormation CreateStack AWS CLI Command
+    Value: !Sub |
+      aws cloudformation create-stack --stack-name my-stack --template-url ${S3BucketName}/template.yaml --role-arn ${CloudFormationIamRole.Arn} --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND
