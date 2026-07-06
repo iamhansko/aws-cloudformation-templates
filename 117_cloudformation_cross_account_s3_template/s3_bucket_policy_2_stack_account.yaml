@@ -2,7 +2,6 @@ Parameters:
   S3BucketName:
     Type: String
     Description: Template S3 Bucket Name
-    Default: CloudFormationIamRole
     AllowedPattern: .+
     ConstraintDescription: S3BucketName must not be empty
 
@@ -10,6 +9,7 @@ Resources:
   CloudFormationIamRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: CloudFormationIamRole
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -24,4 +24,4 @@ Outputs:
   CreateStackCommand:
     Description: CloudFormation CreateStack AWS CLI Command
     Value: !Sub |
-      aws cloudformation create-stack --stack-name my-stack --template-url ${S3BucketName}/template.yaml --role-arn ${CloudFormationIamRole.Arn} --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND
+      aws cloudformation create-stack --stack-name my-stack --template-url https://${S3BucketName}.s3.${AWS::Region}.amazonaws.com/template.yaml --role-arn ${CloudFormationIamRole.Arn} --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND

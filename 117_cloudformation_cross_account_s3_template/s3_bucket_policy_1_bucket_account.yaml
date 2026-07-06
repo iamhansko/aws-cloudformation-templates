@@ -23,6 +23,7 @@ Resources:
     Type: AWS::S3::BucketPolicy
     Properties:
       Bucket: !Ref S3Bucket
+      # "arn:${AWS::Partition}:iam::${CloudFormationAccountId}:role/${CloudFormationIamRoleName}"
       PolicyDocument: !Sub |
         {
           "Version": "2012-10-17",
@@ -31,7 +32,7 @@ Resources:
               "Sid": "AllowGetObject",
               "Effect": "Allow",
               "Principal": {
-                "AWS": "arn:${AWS::Partition}:iam::${CloudFormationAccountId}:role/${CloudFormationIamRoleName}"
+                "AWS": "arn:${AWS::Partition}:iam::${CloudFormationAccountId}:root"
               },
               "Action": [
                 "s3:GetObject",
@@ -43,7 +44,7 @@ Resources:
               "Sid": "AllowGetBucketLocation",
               "Effect": "Allow",
               "Principal": {
-                "AWS": "arn:${AWS::Partition}:iam::${CloudFormationAccountId}:role/${CloudFormationIamRoleName}"
+                "AWS": "arn:${AWS::Partition}:iam::${CloudFormationAccountId}:root"
               },
               "Action": "s3:GetBucketLocation",
               "Resource": "arn:${AWS::Partition}:s3:::${S3Bucket}"
