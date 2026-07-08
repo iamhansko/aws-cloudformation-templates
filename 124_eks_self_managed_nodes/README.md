@@ -1,6 +1,6 @@
-# EKS Networking Troubleshooting
+# EKS Self-managed Node / ASG
 
-## Notes
+## EKS Networking Troubleshooting
 
 API Server Endpoint
 ```
