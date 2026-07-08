@@ -1,0 +1,89 @@
+Parameters:
+  Wait:
+    Type: Number
+    Default: 180
+    MinValue: 0
+    MaxValue: 450
+    Description: Waiting Time
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    DependsOn: WaitCondition
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  WaitConditionHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  WaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: LambdaFunction
+    Properties:
+      Handle: !Ref WaitConditionHandle
+      Timeout: 900
+      Count: 1
+  
+  Signal:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+      WaitConditionHandle: !Ref WaitConditionHandle
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.14
+      Handler: index.handler
+      Timeout: 900
+      Role: !GetAtt LambdaIamRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import json
+          import time
+          import urllib.request
+          import cfnresponse
+
+          def handler(event, context):
+            print(f"Event : {json.dumps(event)}")
+            response_data = {}
+
+            try:
+              request_type = event["RequestType"]
+              wait_condition_handle_url = event["ResourceProperties"]["WaitConditionHandle"]
+              
+              if request_type == "Create":
+                time.sleep(${Wait})
+
+                body = json.dumps({
+                  "Status": "SUCCESS",
+                  "UniqueId": context.aws_request_id,
+                  "Data": "Complete",
+                  "Reason": "The Wait is Over"
+                }).encode("utf-8")
+                request = urllib.request.Request(wait_condition_handle_url, data=body, method="PUT")
+                request.add_header("Content-Type", "")
+                urllib.request.urlopen(request)
+                response_data["Message"] = "Custom Resource Created"
+              elif request_type == "Update":
+                response_data["Message"] = "Custom Resource Updated"
+              elif request_type == "Delete":
+                response_data["Message"] = "Custom Resource Deleted"
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+            except Exception as e:
+              response_data["Reason"] = str(e)
+              cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+  LambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
