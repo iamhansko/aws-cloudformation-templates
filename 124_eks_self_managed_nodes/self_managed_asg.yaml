@@ -472,7 +472,7 @@ Resources:
               --set vpcId=${Vpc}
               sleep 60
 
-              kubectl create deployment nginx --image=nginx --replicas=30
+              kubectl create deployment nginx --image=nginx --replicas=10
 
               SSMEOF
   
