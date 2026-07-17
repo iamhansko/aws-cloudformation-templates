@@ -1,0 +1,113 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  OrganizationId:
+    Description: Organization ID if it exists
+    Type: String
+  AuditAccount:
+    Description: Audit Account ID
+    Type: String
+    AllowedPattern: ^\d{12}$
+    ConstraintDescription: 12-digit AWS Account ID
+  LogArchiveAccount:
+    Description: Log Archive Account ID
+    Type: String
+    AllowedPattern: ^\d{12}$
+    ConstraintDescription: 12-digit AWS Account ID
+Conditions:
+  OrganizationIdNotEmpty: !Not [!Equals [!Ref OrganizationId, ""]]
+  OrganizationIdEmpty: !Equals [!Ref OrganizationId, ""]
+
+Resources:
+  Organization:
+    Type: AWS::Organizations::Organization
+    Condition: OrganizationIdEmpty
+    Properties:
+      FeatureSet: ALL # or CONSOLIDATED_BILLING
+  
+  JohanOU:
+    Type: AWS::Organizations::OrganizationalUnit
+    Properties:
+      Name: Johan
+      ParentId: !If
+        - OrganizationIdNotEmpty
+        - !Ref OrganizationId
+        - !GetAtt Organization.RootId
+
+  ControlTowerLandingZone:
+    Type: AWS::ControlTower::LandingZone
+    Properties:
+      Manifest:
+        # https://docs.aws.amazon.com/ko_kr/controltower/latest/userguide/lz-api-launch.html#w2aac15c17c17b5
+        {
+          "accessManagement": {
+            "enabled": true
+          },
+          "securityRoles": {
+            "accountId": !Ref AuditAccount,
+            "enabled": true
+          },
+          "backup": {
+            "enabled": false
+          },
+          "governedRegions": [
+            !Ref AWS::Region
+          ],
+          "config": {
+            "accountId": !Ref AuditAccount,
+            "configurations": {
+              "loggingBucket": {
+                "retentionDays": 365
+              },
+              "accessLoggingBucket": {
+                "retentionDays": 3650
+              }
+            },
+            "enabled": true
+          },
+          "centralizedLogging": {
+            "accountId": !Ref LogArchiveAccount,
+            "configurations": {
+              "loggingBucket": {
+                "retentionDays": 365
+              },
+              "accessLoggingBucket": {
+                "retentionDays": 3650
+              }
+            },
+            "enabled": true
+          }
+        }
+      RemediationTypes: 
+        - INHERITANCE_DRIFT
+      Version: 3.10 # 3-10
+      Tags: 
+        - Key: x
+          Value: y
+  
+  # ControlTowerControl:
+  #   Type: AWS::ControlTower::EnabledControl
+  #   Properties:
+  #     ControlIdentifier: String
+  #     TargetIdentifier: !GetAtt JohanOU.Arn
+  #     Parameters:
+  #       - Key: String
+  #         Value: 
+  #           - String
+  
+  # ControlTowerBaseline:
+  #   Type: AWS::ControlTower::EnabledBaseline
+  #   Properties:
+  #     BaselineIdentifier: String
+  #     BaselineVersion: String
+  #     TargetIdentifier: !GetAtt JohanOU.Arn
+  #     Parameters: 
+  #       - Key: String
+  #         Value: String
+
+Outputs:
+  ControlTowerLandingZoneArn:
+    Value: !GetAtt ControlTowerLandingZone.Arn
+    Description: ControlTower LandingZone ARN
+  ControlTowerLandingZoneIdentifier:
+    Value: !GetAtt ControlTowerLandingZone.LandingZoneIdentifier
+    Description: ControlTower LandingZone ID
