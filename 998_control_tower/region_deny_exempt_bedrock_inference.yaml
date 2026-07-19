@@ -93,25 +93,38 @@ Resources:
         - Key: x
           Value: y
   
-  # ControlTowerControl:
-  #   Type: AWS::ControlTower::EnabledControl
-  #   Properties:
-  #     ControlIdentifier: String
-  #     TargetIdentifier: !GetAtt JohanOU.Arn
-  #     Parameters:
-  #       - Key: String
-  #         Value: 
-  #           - String
+  ControlTowerControl:
+    Type: AWS::ControlTower::EnabledControl
+    Properties:
+      # [CT.MULTISERVICE.PV.1] Deny access to AWS based on the requested AWS Region for an organizational unit
+      # Disallows access to unlisted operations in global and regional services outside of the specified Regions for an organizational unit.
+      # https://aws.amazon.com/ko/blogs/tech/enable-amazon-bedrock-cross-region-inference-in-multi-account-environments/
+      ControlIdentifier: arn:aws:controlcatalog:::control/ka8e3pkqefnjsxuyc26ji580
+      TargetIdentifier: !GetAtt JohanOU.Arn
+      Parameters:
+        - Key: AllowedRegions
+          Value: 
+            - !Ref AWS::Region
+        - Key: ExemptedActions
+          Value:
+            - besrock:*
+        # - Key: ExemptedPrincipalArns
+        #   Value:
+        #     - 
   
+  # Resource handler returned message: "To change the enablement and configuration of this baseline, you must modify your landing zone settings. (Service: ControlTower, Status Code: 400, Request ID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) (SDK Attempt Count: 1)" (RequestToken: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx, HandlerErrorCode: InvalidRequest)
   # ControlTowerBaseline:
   #   Type: AWS::ControlTower::EnabledBaseline
   #   Properties:
-  #     BaselineIdentifier: String
-  #     BaselineVersion: String
+  #     # aws controltower list-baselines
+  #     # AuditBaseline
+  #     # Sets up resources to monitor security and compliance of accounts in your organization.
+  #     BaselineIdentifier: arn:aws:controltower:ap-northeast-2::baseline/4T4HA1KMO10S6311
+  #     BaselineVersion: 5.0
   #     TargetIdentifier: !GetAtt JohanOU.Arn
-  #     Parameters: 
-  #       - Key: String
-  #         Value: String
+  #     # Parameters: 
+  #     #   - Key: String
+  #     #     Value: String
 
 Outputs:
   ControlTowerLandingZoneArn:
