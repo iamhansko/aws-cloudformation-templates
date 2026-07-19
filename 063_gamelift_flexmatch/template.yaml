@@ -195,6 +195,11 @@ Resources:
           git clone https://github.com/iamhansko/aws-gamelift-sample.git
           mv aws-gamelift-sample gomoku
 
+          # cd /home/ec2-user/gomoku/Lambda
+          # rm code.zip
+          # sed -i 's/us-east-1/${AWS::Region}/g' *.py
+          # zip code.zip *.py redis redis-6.4.0.dist-info
+
           echo '[config]
 
           # GameResult SQS
