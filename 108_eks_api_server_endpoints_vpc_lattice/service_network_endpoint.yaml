@@ -1,0 +1,628 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  KubernetesVersion:
+    Description: EKS Cluster Kubernetes Version (1.XX)
+    Type: String
+    Default: "1.36"
+    AllowedValues: ["1.32", "1.33", "1.34", "1.35", "1.36"]
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping:
+    a:
+      PublicSubnetCidr: 10.1.0.0/24
+      PrivateSubnetCidr: 10.1.2.0/24
+    c:
+      PublicSubnetCidr: 10.1.1.0/24
+      PrivateSubnetCidr: 10.1.3.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  # Cluster VPC (10.1.0.0/16)
+  ClusterVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: cluster-vpc
+  Fn::ForEach::ClusterPublicSubnets:
+    - Az
+    - [a, c]
+    - ClusterPublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub cluster-public-subnet-${Az}
+          VpcId: !Ref ClusterVpc
+      ClusterPublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref ClusterPublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub ClusterPublicSubnet${Az}
+  ClusterPublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ClusterVpc
+      Tags:
+        - Key: Name
+          Value: cluster-public-rt
+  ClusterInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: cluster-igw
+  ClusterVpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref ClusterInternetGateway
+      VpcId: !Ref ClusterVpc
+  ClusterPublicSubnetRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - ClusterVpcInternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ClusterInternetGateway
+      RouteTableId: !Ref ClusterPublicSubnetRouteTable
+  Fn::ForEach::ClusterPrivateSubnets:
+    - Az
+    - [a, c]
+    - ClusterPrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref ClusterVpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub cluster-private-subnet-${Az}
+      ClusterPrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref ClusterPrivateSubnetRouteTable
+          SubnetId:
+            Ref: !Sub ClusterPrivateSubnet${Az}
+  ClusterPrivateSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ClusterVpc
+      Tags:
+        - Key: Name
+          Value: cluster-private-rt
+  ClusterPrivateSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref ClusterNatGateway
+      RouteTableId: !Ref ClusterPrivateSubnetRouteTable
+  ClusterNatgatewayElasticIpa:
+    Type: AWS::EC2::EIP
+  ClusterNatgatewayElasticIpc:
+    Type: AWS::EC2::EIP
+  ClusterNatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn:
+      - ClusterVpcInternetGatewayAttachment
+    Properties:
+      VpcId: !Ref ClusterVpc
+      AvailabilityMode: regional
+      AvailabilityZoneAddresses:
+        - AvailabilityZone: !Sub ${AWS::Region}a
+          AllocationIds: 
+            - !GetAtt ClusterNatgatewayElasticIpa.AllocationId
+        - AvailabilityZone: !Sub ${AWS::Region}c
+          AllocationIds: 
+            - !GetAtt ClusterNatgatewayElasticIpc.AllocationId
+      Tags: 
+        - Key : Name
+          Value : !Sub cluster-regional-natgw
+
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Version: !Ref KubernetesVersion
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      BootstrapSelfManagedAddons: false
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      ResourcesVpcConfig:
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: false
+        SubnetIds:
+          - !Ref ClusterPrivateSubneta
+          - !Ref ClusterPrivateSubnetc
+      RoleArn: !GetAtt EksClusterIamRole.Arn
+      KubernetesNetworkConfig:
+        IpFamily: ipv4
+        ServiceIpv4Cidr: 172.20.0.0/16
+  EksClusterIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  VpcCniAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: vpc-cni
+      ClusterName: !Ref EksCluster
+      ResolveConflicts: OVERWRITE
+  KubeProxyAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: kube-proxy
+      ClusterName: !Ref EksCluster
+      ResolveConflicts: OVERWRITE
+  CoreDnsAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: coredns
+      ClusterName: !Ref EksCluster
+      ResolveConflicts: OVERWRITE
+  CoreNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: core-nodegroup
+      AmiType: AL2023_x86_64_STANDARD
+      InstanceTypes:
+        - t3.large
+      CapacityType: ON_DEMAND
+      ClusterName: !Ref EksCluster
+      ForceUpdateEnabled: true
+      NodeRole: !GetAtt EksNodeIamRole.Arn
+      ScalingConfig:
+        DesiredSize: 2
+        MaxSize: 4
+        MinSize: 2
+      Subnets:
+        - !Ref ClusterPrivateSubneta
+        - !Ref ClusterPrivateSubnetc
+  EksNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  # Client VPC (10.1.0.0/16)
+  ClientVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: client-vpc
+  Fn::ForEach::ClientPublicSubnets:
+    - Az
+    - [a, c]
+    - ClientPublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub client-public-subnet-${Az}
+          VpcId: !Ref ClientVpc
+      ClientPublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref ClientPublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub ClientPublicSubnet${Az}
+  ClientPublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ClientVpc
+      Tags:
+        - Key: Name
+          Value: client-public-rt
+  ClientInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: client-igw
+  ClientVpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref ClientInternetGateway
+      VpcId: !Ref ClientVpc
+  ClientPublicSubnetRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - ClientVpcInternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ClientInternetGateway
+      RouteTableId: !Ref ClientPublicSubnetRouteTable
+  
+  VpcLatticeResourceGateway:
+    Type: AWS::VpcLattice::ResourceGateway
+    Properties:
+      Name: eks-cluster-vpc-resource-gateway
+      VpcIdentifier: !Ref ClusterVpc
+      SubnetIds:
+        - !Ref ClusterPrivateSubneta
+        - !Ref ClusterPrivateSubnetc
+      SecurityGroupIds:
+        - !Ref VpcLatticeResourceGatewaySecurityGroup
+      IpAddressType: IPV4
+      ResourceConfigDnsResolution: IN_VPC
+      Tags:
+        - Key: Name
+          Value: eks-cluster-resource-gateway
+  VpcLatticeResourceGatewaySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: VPC Lattice Resource Gateway
+      GroupName: resource-gateway-sg
+      VpcId: !Ref ClusterVpc
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !GetAtt ClusterVpc.CidrBlock
+      Tags:
+        - Key: Name
+          Value: resource-gateway-sg
+  EksClusterDefaultSecurityGroupResourceGatewayIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref VpcLatticeResourceGatewaySecurityGroup
+  VpcLatticeResourceConfiguration:
+    Type: AWS::VpcLattice::ResourceConfiguration
+    Properties:
+      Name: eks-api-server
+      ResourceConfigurationType: SINGLE
+      ResourceGatewayId: !Ref VpcLatticeResourceGateway
+      ProtocolType: TCP
+      PortRanges:
+        - 1-65535
+      AllowAssociationToSharableServiceNetwork: true
+      CustomDomainName: !Select [1, !Split ["//", !GetAtt EksCluster.Endpoint]]
+      ResourceConfigurationDefinition:
+        DnsResource:
+          DomainName: !Select [1, !Split ["//", !GetAtt EksCluster.Endpoint]]
+          IpAddressType: IPV4
+      Tags:
+        - Key: Name
+          Value: eks-api-server
+  VpcLatticeServiceNetwork:
+    Type: AWS::VpcLattice::ServiceNetwork
+    Properties:
+      Name: eks-service-network
+  VpcLatticeServiceNetworkResourceAssociation:
+    Type: AWS::VpcLattice::ServiceNetworkResourceAssociation
+    Properties:
+      ResourceConfigurationId: !GetAtt VpcLatticeResourceConfiguration.Id
+      ServiceNetworkId: !Ref VpcLatticeServiceNetwork
+      PrivateDnsEnabled: true
+  
+  # VPC Lattice SN-A
+  # This creates a private and secure network path to access the cluster API for clients inside the client VPC.
+  # VpcLatticeServiceNetworkVpcAssociation:
+  #   Type: AWS::VpcLattice::ServiceNetworkVpcAssociation
+  #   Properties:
+  #     # DnsOptions: 
+  #     #   PrivateDnsPreference: ALL_DOMAINS # SPECIFIED_DOMAINS_ONLY # VERIFIED_DOMAINS_ONLY | ALL_DOMAINS | VERIFIED_DOMAINS_AND_SPECIFIED_DOMAINS
+  #     #   PrivateDnsSpecifiedDomains:
+  #     #     - !Select [1, !Split ["//", !GetAtt EksCluster.Endpoint]]
+  #     SecurityGroupIds: 
+  #       - !Ref VpcLatticeServiceNetworkAssociationSecurityGroup
+  #     ServiceNetworkIdentifier: !Ref VpcLatticeServiceNetwork
+  #     VpcIdentifier: !Ref ClientVpc
+  #     # PrivateDnsEnabled: true
+  # VpcLatticeServiceNetworkAssociationSecurityGroup:
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: VPC Lattice Service Network VPC Association
+  #     GroupName: vpc-lattice-sna-sg
+  #     VpcId: !Ref ClientVpc
+  #     SecurityGroupEgress:
+  #       - IpProtocol: tcp
+  #         FromPort: 443
+  #         ToPort: 443
+  #         CidrIp: !GetAtt ClientVpc.CidrBlock
+  #     Tags:
+  #       - Key: Name
+  #         Value: vpc-lattice-sna-sg
+
+  # VPC Lattice SN-E
+  # This creates a private and secure network path to access the cluster API for clients inside the client VPC. It also allows access to the service network peered VPCs, on-premises, or over VPN/Direct Connect.
+  VpcLatticeServiceNetworkEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: ServiceNetwork
+      VpcId: !Ref ClientVpc
+      ServiceNetworkArn: !Ref VpcLatticeServiceNetwork
+      SubnetIds:
+        - !Ref ClientPublicSubneta
+        - !Ref ClientPublicSubnetc
+      SecurityGroupIds:
+        - !Ref VpcLatticeServiceNetworkEndpointSecurityGroup
+  VpcLatticeServiceNetworkEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: VPC Lattice Service Network VPC Endpoint
+      GroupName: vpc-lattice-sne-sg
+      VpcId: !Ref ClientVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !GetAtt ClientVpc.CidrBlock
+      Tags:
+        - Key: Name
+          Value: vpc-lattice-sne-sg
+  VpcLatticeServiceNetworkEndpointAssociation:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: 
+      - VpcLatticeServiceNetworkResourceAssociation
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+      VpcEndpoint: !Ref VpcLatticeServiceNetworkEndpoint
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.14
+      Handler: index.handler
+      Timeout: 900
+      Role: !GetAtt LambdaIamRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import json
+          import cfnresponse
+          import boto3
+
+          ec2 = boto3.client("ec2")
+
+          def handler(event, context):
+            print(f"Event : {json.dumps(event)}")
+            response_data = {}
+
+            try:
+              request_type = event["RequestType"]
+              vpce_id = event["ResourceProperties"]["VpcEndpoint"]
+              vpce = ec2.describe_vpc_endpoint_associations(VpcEndpointIds=[f"{vpce_id}"])
+              print(f"VPC Endpoint : {json.dumps(vpce)}")
+              
+              if request_type in ["Create", "Update"]:
+                response_data["Message"] = "Custom Resource Created"
+                response_data["DnsName"] = vpce["VpcEndpointAssociations"][0]["DnsEntry"]["DnsName"]
+                response_data["HostedZoneId"] = vpce["VpcEndpointAssociations"][0]["DnsEntry"]["HostedZoneId"]
+              elif request_type == "Delete":
+                response_data["Message"] = "Custom Resource Deleted"
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+            except Exception as e:
+              print(str(e))
+              cfnresponse.send(event, context, cfnresponse.FAILED, response_data, reason=str(e))
+  LambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+
+  Route53PrivateHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Select [1, !Split ["//", !GetAtt EksCluster.Endpoint]]
+      VPCs: 
+        - VPCId: !Ref ClientVpc
+          VPCRegion: !Ref AWS::Region
+  Route53AliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !GetAtt Route53PrivateHostedZone.Id
+      Name: !Select [1, !Split ["//", !GetAtt EksCluster.Endpoint]]
+      Type: A
+      AliasTarget: 
+        DNSName: !GetAtt VpcLatticeServiceNetworkEndpointAssociation.DnsName
+        HostedZoneId: !GetAtt VpcLatticeServiceNetworkEndpointAssociation.HostedZoneId
+        EvaluateTargetHealth: false
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - CoreNodeGroup
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !GetAtt ClientPublicSubneta.SubnetId
+          GroupSet:
+            - !Ref VsCodeEc2SecurityGroup
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: vscode
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              dnf update -yq
+              dnf install -yq git bind-utils
+              dnf groupinstall -yq "Development Tools"
+
+              export VSC_VERSION=$(curl -s https://api.github.com/repos/coder/code-server/releases/latest | jq -r '.tag_name | ltrimstr("v")')
+              wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+              tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+              mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+              ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+              mkdir -p /home/ec2-user/.config/code-server
+              cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+              bind-addr: 0.0.0.0:8000
+              auth: none
+              cert: false
+              EOF
+              chown -R ec2-user:ec2-user /home/ec2-user/.config
+              cat <<EOF > /etc/systemd/system/code-server.service
+              [Unit]
+              Description=VS Code Server
+              After=network.target
+              [Service]
+              Type=simple
+              User=ec2-user
+              ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+              Restart=always
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+              systemctl daemon-reload
+              systemctl enable code-server
+              systemctl start code-server
+
+              sudo -Eu ec2-user bash << 'EOF'
+              cd /home/ec2-user
+              mkdir -p /home/ec2-user/bin
+              curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.3/2025-08-03/bin/linux/amd64/kubectl
+              chmod +x kubectl
+              mv kubectl /home/ec2-user/bin/kubectl
+              export PATH=/home/ec2-user/bin:$PATH
+              echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+              echo "alias k=kubectl" >> ~/.bashrc
+              echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+              echo "source <(kubectl completion bash)" >> ~/.bashrc
+              exec bash
+
+              echo '# FQDN resolves to Private IPs without VPC Lattice Service Network / VPC Peering Connection / Transit Gateway
+              dig ${EksClusterApiServerEndpoint}
+
+              # HTTP 401 Unauthorized is expected
+              curl https://${EksClusterApiServerEndpoint} -vk
+
+              aws eks update-kubeconfig --name ${EksCluster} --region ${AWS::Region}
+              ' > /home/ec2-user/README.md
+
+              EOF
+
+              /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+            - EksClusterApiServerEndpoint: !Select [1, !Split ["//", !GetAtt EksCluster.Endpoint]]
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vscode-sg
+      VpcId: !Ref ClientVpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: vscode-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref VsCodeEc2IamRole
+  VsCodeEc2IamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      Type: STANDARD
+      PrincipalArn: !GetAtt VsCodeEc2IamRole.Arn
+      AccessPolicies:
+        - AccessScope:
+            Type: cluster
+          PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${VsCodeEc2.PublicIp}:8000
+    Description: Public IP Address of the VS Code
+  EksClusterApiServerEndpoint:
+    Value: !GetAtt EksCluster.Endpoint
+    Description: EKS Cluster API Server - Private Endpoint (ClusterVpc)
