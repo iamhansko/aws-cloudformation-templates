@@ -312,11 +312,11 @@ Resources:
       GroupDescription: VPC Lattice Resource Gateway
       GroupName: resource-gateway-sg
       VpcId: !Ref ClusterVpc
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: !GetAtt ClusterVpc.CidrBlock
+      # SecurityGroupIngress:
+      #   - IpProtocol: tcp
+      #     FromPort: 443
+      #     ToPort: 443
+      #     CidrIp: !GetAtt ClusterVpc.CidrBlock
       Tags:
         - Key: Name
           Value: resource-gateway-sg
