@@ -17,9 +17,6 @@ Conditions:
   SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
 
 Mappings:
-  # Non-routable /28 (EKS control-plane cross-account ENIs) and /20 (worker nodes/pods)
-  # subnet CIDRs, carved out of the 100.64.0.0/16 secondary CIDR. VpcA and VpcB reuse the
-  # exact same values here since their non-routable address space intentionally overlaps.
   NonRoutableAzMapping:
     a:
       ClusterSubnetCidr: 100.64.1.0/28
@@ -27,9 +24,6 @@ Mappings:
     c:
       ClusterSubnetCidr: 100.64.2.0/28
       NodeSubnetCidr: 100.64.32.0/20
-  # Routable /24 public (public NAT gateway/IGW) and private (private NAT gateway/TGW
-  # attachment) subnet CIDRs. VpcA and VpcB use distinct, non-overlapping ranges here
-  # since routable CIDRs must never overlap.
   VpcAAzMapping:
     a:
       PublicSubnetCidr: 192.168.16.0/24
@@ -86,7 +80,7 @@ Resources:
       Tags:
         - Key: Name
           Value: vpc-a-public-rt
-  VpcAPublicRoute: # VpcAPublicInternetRoute
+  VpcAPublicInternetRoute:
     Type: AWS::EC2::Route
     DependsOn:
       - VpcAInternetGatewayAttachment
@@ -283,7 +277,7 @@ Resources:
       Tags:
         - Key: Name
           Value: vpc-b-public-rt
-  VpcBPublicRoute: # VpcBPublicInternetRoute
+  VpcBPublicInternetRoute:
     Type: AWS::EC2::Route
     DependsOn:
       - VpcBInternetGatewayAttachment
@@ -982,107 +976,6 @@ Resources:
       ClusterName: !Ref VpcBEksCluster
       PrincipalArn: !GetAtt VpcBEc2IamRole.Arn
       Type: STANDARD
-  
-  # Fn::ForEach::EksClusters:
-  #   - Vpc
-  #   - [VpcA, VpcB]
-  #   - ${Vpc}Ec2SsmAssociation:
-  #       Type: AWS::SSM::Association
-  #       DependsOn:
-  #         - !Sub ${Vpc}Ec2 # Required
-  #       Properties:
-  #         Name: AWS-RunShellScript
-  #         WaitForSuccessTimeoutSeconds: 600
-  #         Targets:
-  #           - Key: InstanceIds
-  #             Values:
-  #               - Ref: !Sub ${Vpc}Ec2
-  #         Parameters:
-  #           commands: 
-  #             # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
-  #             - !Sub 
-  #               - |
-  #                 su - ec2-user << 'SSMEOF'
-  #                 export HOME=/home/ec2-user
-  #                 cd $HOME
-
-  #                 curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-  #                 sudo mv /tmp/eksctl /usr/local/bin
-
-  #                 curl -fsSL -o /home/ec2-user/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
-  #                 chmod 700 /home/ec2-user/get_helm.sh
-  #                 /home/ec2-user/get_helm.sh
-  #                 rm /home/ec2-user/get_helm.sh
-
-  #                 helm repo add eks https://aws.github.io/eks-charts
-  #                 helm repo update eks
-  #                 helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
-  #                 --set clusterName=${VpcAEksCluster} \
-  #                 --set serviceAccount.name=aws-load-balancer-controller \
-  #                 --set region=${AWS::Region} \
-  #                 --set vpcId=${VpcId} \
-  #                 sleep 60
-
-  #                 mkdir -p /home/ec2-user/manifests
-  #                 echo 'apiVersion: apps/v1
-  #                 kind: Deployment
-  #                 metadata:
-  #                   name: nginx
-  #                 spec:
-  #                   selector:
-  #                     matchLabels:
-  #                       app: nginx
-  #                   replicas: 5
-  #                   template:
-  #                     metadata:
-  #                       labels:
-  #                         app: nginx
-  #                     spec:
-  #                       containers:
-  #                       - image: nginx:latest
-  #                         imagePullPolicy: Always
-  #                         name: nginx
-  #                         ports:
-  #                         - containerPort: 80
-  #                 ---
-  #                 apiVersion: v1
-  #                 kind: Service
-  #                 metadata:
-  #                   name: nginx
-  #                 spec:
-  #                   ports:
-  #                     - port: 80
-  #                       targetPort: 80
-  #                       protocol: TCP
-  #                   type: ClusterIP
-  #                   selector:
-  #                     app: nginx
-  #                 ---
-  #                 apiVersion: networking.k8s.io/v1
-  #                 kind: Ingress
-  #                 metadata:
-  #                   name: nginx
-  #                   annotations:
-  #                     alb.ingress.kubernetes.io/scheme: internet-facing
-  #                     alb.ingress.kubernetes.io/target-type: ip
-  #                 spec:
-  #                   ingressClassName: alb
-  #                   rules:
-  #                     - http:
-  #                         paths:
-  #                         - path: /
-  #                           pathType: Prefix
-  #                           backend:
-  #                             service:
-  #                               name: nginx
-  #                               port:
-  #                                 number: 80' > /home/ec2-user/manifests/web.yaml
-  #                 kubectl apply -f /home/ec2-user/manifests/web.yaml
-  #                 SSMEOF
-  #               - VpcId:
-  #                   Ref: !Sub ${Vpc}
-  #               - EksCluster:
-  #                   Ref: !Sub ${Vpc}EksCluster
 
   VpcAEc2SsmAssociation:
     Type: AWS::SSM::Association
