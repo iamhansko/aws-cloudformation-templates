@@ -1,0 +1,1354 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  KubernetesVersion:
+    Description: EKS Cluster Kubernetes Version (1.XX)
+    Type: String
+    Default: "1.36"
+    AllowedValues: ["1.32", "1.33", "1.34", "1.35", "1.36"]
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  # Non-routable /28 (EKS control-plane cross-account ENIs) and /20 (worker nodes/pods)
+  # subnet CIDRs, carved out of the 100.64.0.0/16 secondary CIDR. VpcA and VpcB reuse the
+  # exact same values here since their non-routable address space intentionally overlaps.
+  NonRoutableAzMapping:
+    a:
+      ClusterSubnetCidr: 100.64.1.0/28
+      NodeSubnetCidr: 100.64.16.0/20
+    c:
+      ClusterSubnetCidr: 100.64.2.0/28
+      NodeSubnetCidr: 100.64.32.0/20
+  # Routable /24 public (public NAT gateway/IGW) and private (private NAT gateway/TGW
+  # attachment) subnet CIDRs. VpcA and VpcB use distinct, non-overlapping ranges here
+  # since routable CIDRs must never overlap.
+  VpcAAzMapping:
+    a:
+      PublicSubnetCidr: 192.168.16.0/24
+      PrivateSubnetCidr: 192.168.17.0/24
+    c:
+      PublicSubnetCidr: 192.168.18.0/24
+      PrivateSubnetCidr: 192.168.19.0/24
+  VpcBAzMapping:
+    a:
+      PublicSubnetCidr: 192.168.32.0/24
+      PrivateSubnetCidr: 192.168.33.0/24
+    c:
+      PublicSubnetCidr: 192.168.34.0/24
+      PrivateSubnetCidr: 192.168.35.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  # VPC A (192.168.16.0/20 & 100.64.0.0/16)
+  VpcA:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 192.168.16.0/20
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: vpc-a
+  VpcASecondaryCidrBlock:
+    Type: AWS::EC2::VPCCidrBlock
+    Properties:
+      VpcId: !Ref VpcA
+      CidrBlock: 100.64.0.0/16
+  VpcAInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: vpc-a-igw
+  VpcAInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref VpcAInternetGateway
+      VpcId: !Ref VpcA
+  VpcAPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcA
+      Tags:
+        - Key: Name
+          Value: vpc-a-public-rt
+  VpcAPublicRoute: # VpcAPublicInternetRoute
+    Type: AWS::EC2::Route
+    DependsOn:
+      - VpcAInternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref VpcAPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref VpcAInternetGateway
+  VpcAPublicPeerRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - TransitGatewayVpcBAttachment
+    Properties:
+      RouteTableId: !Ref VpcAPublicRouteTable
+      DestinationCidrBlock: !GetAtt VpcB.CidrBlock
+      TransitGatewayId: !Ref TransitGateway
+  Fn::ForEach::VpcAPublicSubnets:
+    - Az
+    - [a, c]
+    - VpcAPublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref VpcA
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [VpcAAzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-a-public-subnet-${Az}
+            - Key: kubernetes.io/role/elb
+              Value: "1"
+      VpcAPublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref VpcAPublicRouteTable
+          SubnetId:
+            Ref: !Sub VpcAPublicSubnet${Az}
+  Fn::ForEach::VpcAPrivateSubnets:
+    - Az
+    - [a, c]
+    - VpcAPrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref VpcA
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [VpcAAzMapping, !Ref Az, PrivateSubnetCidr]
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-a-private-subnet-${Az}
+            - Key: kubernetes.io/role/internal-elb
+              Value: "1"
+      VpcAPublicNatGatewayEip${Az}:
+        Type: AWS::EC2::EIP
+      VpcAPublicNatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        DependsOn:
+          - VpcAInternetGatewayAttachment
+        Properties:
+          ConnectivityType: public
+          SubnetId:
+            Ref: !Sub VpcAPublicSubnet${Az}
+          AllocationId:
+            Fn::GetAtt:
+              - !Sub VpcAPublicNatGatewayEip${Az}
+              - AllocationId
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-a-public-natgw-${Az}
+      VpcAPrivateNatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          ConnectivityType: private
+          SubnetId:
+            Ref: !Sub VpcAPrivateSubnet${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-a-private-natgw-${Az}
+      VpcAPrivateRouteTable${Az}:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref VpcA
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-a-private-rt-${Az}
+      VpcAPrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcAPrivateRouteTable${Az}
+          SubnetId:
+            Ref: !Sub VpcAPrivateSubnet${Az}
+      VpcAPrivateInternetRoute${Az}:
+        Type: AWS::EC2::Route
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcAPrivateRouteTable${Az}
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub VpcAPublicNatGateway${Az}
+      VpcAPrivatePeerRoute${Az}:
+        Type: AWS::EC2::Route
+        DependsOn:
+          - TransitGatewayVpcBAttachment
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcAPrivateRouteTable${Az}
+          DestinationCidrBlock: !GetAtt VpcB.CidrBlock
+          TransitGatewayId: !Ref TransitGateway
+  Fn::ForEach::VpcANonRoutableSubnets:
+    - Az
+    - [a, c]
+    - VpcAClusterSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        DependsOn:
+          - VpcASecondaryCidrBlock
+        Properties:
+          VpcId: !Ref VpcA
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [NonRoutableAzMapping, !Ref Az, ClusterSubnetCidr]
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-a-cluster-subnet-${Az}
+      VpcANodeSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        DependsOn:
+          - VpcASecondaryCidrBlock
+        Properties:
+          VpcId: !Ref VpcA
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [NonRoutableAzMapping, !Ref Az, NodeSubnetCidr]
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-a-node-subnet-${Az}
+      VpcANodeRouteTable${Az}:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref VpcA
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-a-node-rt-${Az}
+      VpcANodeSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcANodeRouteTable${Az}
+          SubnetId:
+            Ref: !Sub VpcANodeSubnet${Az}
+      VpcANodeInternetRoute${Az}:
+        Type: AWS::EC2::Route
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcANodeRouteTable${Az}
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub VpcAPublicNatGateway${Az}
+      VpcANodePeerRoute${Az}:
+        Type: AWS::EC2::Route
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcANodeRouteTable${Az}
+          DestinationCidrBlock: !GetAtt VpcB.CidrBlock
+          NatGatewayId:
+            Ref: !Sub VpcAPrivateNatGateway${Az}
+
+  # VPC B (192.168.32.0/20 & 100.64.0.0/16)
+  VpcB:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 192.168.32.0/20
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: vpc-b
+  VpcBSecondaryCidrBlock:
+    Type: AWS::EC2::VPCCidrBlock
+    Properties:
+      VpcId: !Ref VpcB
+      CidrBlock: 100.64.0.0/16
+  VpcBInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: vpc-b-igw
+  VpcBInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref VpcBInternetGateway
+      VpcId: !Ref VpcB
+  VpcBPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcB
+      Tags:
+        - Key: Name
+          Value: vpc-b-public-rt
+  VpcBPublicRoute: # VpcBPublicInternetRoute
+    Type: AWS::EC2::Route
+    DependsOn:
+      - VpcBInternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref VpcBPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref VpcBInternetGateway
+  VpcBPublicPeerRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - TransitGatewayVpcBAttachment
+    Properties:
+      RouteTableId: !Ref VpcBPublicRouteTable
+      DestinationCidrBlock: !GetAtt VpcA.CidrBlock
+      TransitGatewayId: !Ref TransitGateway
+  Fn::ForEach::VpcBPublicSubnets:
+    - Az
+    - [a, c]
+    - VpcBPublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref VpcB
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [VpcBAzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-b-public-subnet-${Az}
+      VpcBPublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref VpcBPublicRouteTable
+          SubnetId:
+            Ref: !Sub VpcBPublicSubnet${Az}
+  Fn::ForEach::VpcBPrivateSubnets:
+    - Az
+    - [a, c]
+    - VpcBPrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref VpcB
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [VpcBAzMapping, !Ref Az, PrivateSubnetCidr]
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-b-private-subnet-${Az}
+            - Key: kubernetes.io/role/internal-elb
+              Value: "1"
+      VpcBPublicNatGatewayEip${Az}:
+        Type: AWS::EC2::EIP
+      VpcBPublicNatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        DependsOn:
+          - VpcBInternetGatewayAttachment
+        Properties:
+          ConnectivityType: public
+          SubnetId:
+            Ref: !Sub VpcBPublicSubnet${Az}
+          AllocationId:
+            Fn::GetAtt:
+              - !Sub VpcBPublicNatGatewayEip${Az}
+              - AllocationId
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-b-public-natgw-${Az}
+      VpcBPrivateNatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          ConnectivityType: private
+          SubnetId:
+            Ref: !Sub VpcBPrivateSubnet${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-b-private-natgw-${Az}
+      VpcBPrivateRouteTable${Az}:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref VpcB
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-b-private-rt-${Az}
+      VpcBPrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcBPrivateRouteTable${Az}
+          SubnetId:
+            Ref: !Sub VpcBPrivateSubnet${Az}
+      VpcBPrivateInternetRoute${Az}:
+        Type: AWS::EC2::Route
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcBPrivateRouteTable${Az}
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub VpcBPublicNatGateway${Az}
+      VpcBPrivatePeerRoute${Az}:
+        Type: AWS::EC2::Route
+        DependsOn:
+          - TransitGatewayVpcAAttachment
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcBPrivateRouteTable${Az}
+          DestinationCidrBlock: !GetAtt VpcA.CidrBlock
+          TransitGatewayId: !Ref TransitGateway
+  Fn::ForEach::VpcBNonRoutableSubnets:
+    - Az
+    - [a, c]
+    - VpcBClusterSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        DependsOn:
+          - VpcBSecondaryCidrBlock
+        Properties:
+          VpcId: !Ref VpcB
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [NonRoutableAzMapping, !Ref Az, ClusterSubnetCidr]
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-b-cluster-subnet-${Az}
+      VpcBNodeSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        DependsOn:
+          - VpcBSecondaryCidrBlock
+        Properties:
+          VpcId: !Ref VpcB
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [NonRoutableAzMapping, !Ref Az, NodeSubnetCidr]
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-b-node-subnet-${Az}
+      VpcBNodeRouteTable${Az}:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref VpcB
+          Tags:
+            - Key: Name
+              Value: !Sub vpc-b-node-rt-${Az}
+      VpcBNodeSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcBNodeRouteTable${Az}
+          SubnetId:
+            Ref: !Sub VpcBNodeSubnet${Az}
+      VpcBNodeInternetRoute${Az}:
+        Type: AWS::EC2::Route
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcBNodeRouteTable${Az}
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub VpcBPublicNatGateway${Az}
+      VpcBNodePeerRoute${Az}:
+        Type: AWS::EC2::Route
+        Properties:
+          RouteTableId:
+            Ref: !Sub VpcBNodeRouteTable${Az}
+          DestinationCidrBlock: !GetAtt VpcA.CidrBlock
+          NatGatewayId:
+            Ref: !Sub VpcBPrivateNatGateway${Az}
+
+  TransitGateway:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      Description: Vpc A <-> Vpc B
+      AutoAcceptSharedAttachments: enable
+      DefaultRouteTableAssociation: disable
+      DefaultRouteTablePropagation: disable
+      DnsSupport: enable
+      VpnEcmpSupport: enable
+      Tags:
+        - Key: Name
+          Value: tgw
+  TransitGatewayRouteTable:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      Tags:
+        - Key: Name
+          Value: tgw-rt
+  TransitGatewayVpcAAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref VpcA
+      SubnetIds:
+        - !Ref VpcAPrivateSubneta
+        - !Ref VpcAPrivateSubnetc
+      Tags:
+        - Key: Name
+          Value: tgw-vpc-a
+  TransitGatewayVpcBAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref VpcB
+      SubnetIds:
+        - !Ref VpcBPrivateSubneta
+        - !Ref VpcBPrivateSubnetc
+      Tags:
+        - Key: Name
+          Value: tgw-vpc-b
+  TransitGatewayVpcAAttachmentAssociation:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Properties:
+      TransitGatewayAttachmentId: !Ref TransitGatewayVpcAAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+  TransitGatewayVpcBAttachmentAssociation:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Properties:
+      TransitGatewayAttachmentId: !Ref TransitGatewayVpcBAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+  TransitGatewayVpcARoute:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+      TransitGatewayAttachmentId: !Ref TransitGatewayVpcAAttachment
+      DestinationCidrBlock: !GetAtt VpcA.CidrBlock
+  TransitGatewayVpcBRoute:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+      TransitGatewayAttachmentId: !Ref TransitGatewayVpcBAttachment
+      DestinationCidrBlock: !GetAtt VpcB.CidrBlock
+
+  VpcAEksCluster: # VPC A
+    Type: AWS::EKS::Cluster
+    Properties:
+      Version: !Ref KubernetesVersion
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      BootstrapSelfManagedAddons: false
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      ResourcesVpcConfig:
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: false
+        SubnetIds:
+          - !Ref VpcAClusterSubneta
+          - !Ref VpcAClusterSubnetc
+      RoleArn: !GetAtt EksClusterIamRole.Arn
+      KubernetesNetworkConfig:
+        IpFamily: ipv4
+        ServiceIpv4Cidr: 172.20.0.0/16
+  VpcAVpcCniAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: vpc-cni
+      ClusterName: !Ref VpcAEksCluster
+  VpcAKubeProxyAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: kube-proxy
+      ClusterName: !Ref VpcAEksCluster
+  VpcACoreDnsAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: coredns
+      ClusterName: !Ref VpcAEksCluster
+  VpcAPodIdentityAgentAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: eks-pod-identity-agent
+      ClusterName: !Ref VpcAEksCluster
+  VpcAAwsLoadBalancerControllerRolePodIdentityAssociation:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Ref VpcAEksCluster
+      Namespace: kube-system
+      RoleArn: !GetAtt AwsLoadBalancerControllerRole.Arn
+      ServiceAccount: aws-load-balancer-controller
+  VpcACoreNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: core-nodegroup
+      AmiType: AL2023_x86_64_STANDARD
+      InstanceTypes:
+        - t3.medium
+      CapacityType: ON_DEMAND
+      ClusterName: !Ref VpcAEksCluster
+      ForceUpdateEnabled: true
+      NodeRole: !GetAtt EksNodeIamRole.Arn
+      ScalingConfig:
+        DesiredSize: 2
+        MaxSize: 4
+        MinSize: 2
+      Subnets:
+        - !Ref VpcANodeSubneta
+        - !Ref VpcANodeSubnetc
+  
+  VpcBEksCluster: # VPC A
+    Type: AWS::EKS::Cluster
+    Properties:
+      Version: !Ref KubernetesVersion
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      BootstrapSelfManagedAddons: false
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      ResourcesVpcConfig:
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: false
+        SubnetIds:
+          - !Ref VpcBClusterSubneta
+          - !Ref VpcBClusterSubnetc
+      RoleArn: !GetAtt EksClusterIamRole.Arn
+      KubernetesNetworkConfig:
+        IpFamily: ipv4
+        ServiceIpv4Cidr: 172.20.0.0/16
+  VpcBVpcCniAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: vpc-cni
+      ClusterName: !Ref VpcBEksCluster
+  VpcBKubeProxyAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: kube-proxy
+      ClusterName: !Ref VpcBEksCluster
+  VpcBCoreDnsAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: coredns
+      ClusterName: !Ref VpcBEksCluster
+  VpcBPodIdentityAgentAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: eks-pod-identity-agent
+      ClusterName: !Ref VpcBEksCluster
+  VpcBAwsLoadBalancerControllerRolePodIdentityAssociation:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Ref VpcBEksCluster
+      Namespace: kube-system
+      RoleArn: !GetAtt AwsLoadBalancerControllerRole.Arn
+      ServiceAccount: aws-load-balancer-controller
+  VpcBCoreNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: core-nodegroup
+      AmiType: AL2023_x86_64_STANDARD
+      InstanceTypes:
+        - t3.medium
+      CapacityType: ON_DEMAND
+      ClusterName: !Ref VpcBEksCluster
+      ForceUpdateEnabled: true
+      NodeRole: !GetAtt EksNodeIamRole.Arn
+      ScalingConfig:
+        DesiredSize: 2
+        MaxSize: 4
+        MinSize: 2
+      Subnets:
+        - !Ref VpcBNodeSubneta
+        - !Ref VpcBNodeSubnetc
+
+  EksClusterIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  EksNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  AwsLoadBalancerControllerRole:
+    # https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: AWSLoadBalancerControllerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource: "*"
+                Condition:
+                  StringEquals: 
+                    iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+              - Effect: Allow
+                Action: 
+                  - ec2:*
+                  - elasticloadbalancing:*
+                Resource: "*"
+              - Effect: Allow
+                Action: 
+                  - cognito-idp:DescribeUserPoolClient
+                  - acm:ListCertificates
+                  - acm:DescribeCertificate
+                  - iam:ListServerCertificates
+                  - iam:GetServerCertificate
+                  - waf-regional:GetWebACL
+                  - waf-regional:GetWebACLForResource
+                  - waf-regional:AssociateWebACL
+                  - waf-regional:DisassociateWebACL
+                  - wafv2:GetWebACL
+                  - wafv2:GetWebACLForResource
+                  - wafv2:AssociateWebACL
+                  - wafv2:DisassociateWebACL
+                  - shield:GetSubscriptionState
+                  - shield:DescribeProtection
+                  - shield:CreateProtection
+                  - shield:DeleteProtection
+                Resource: "*"
+
+  VpcAEc2: # VPC A
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - VpcACoreNodeGroup
+      - VpcBCoreNodeGroup
+      - TransitGatewayVpcARoute
+      - TransitGatewayVpcBRoute
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref VpcAPublicSubneta
+          GroupSet:
+            - !Ref VpcAEc2SecurityGroup
+            - !GetAtt VpcAEksCluster.ClusterSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: vpc-a-ec2
+      IamInstanceProfile: !Ref VpcAEc2InstanceProfile
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git
+          dnf groupinstall -yq "Development Tools"
+
+          export VSC_VERSION=$(curl -s https://api.github.com/repos/coder/code-server/releases/latest | jq -r '.tag_name | ltrimstr("v")')
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          sudo -Eu ec2-user bash << 'EOF'
+          cd /home/ec2-user
+          mkdir -p /home/ec2-user/bin
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.3/2025-08-03/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          mv kubectl /home/ec2-user/bin/kubectl
+          export PATH=/home/ec2-user/bin:$PATH
+          echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+          echo "alias k=kubectl" >> ~/.bashrc
+          echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+          echo "source <(kubectl completion bash)" >> ~/.bashrc
+          exec bash
+
+          aws eks update-kubeconfig --name ${VpcAEksCluster} --region ${AWS::Region}
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VpcAEc2 --region ${AWS::Region}
+  VpcAEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vpc-a-ec2-sg
+      VpcId: !Ref VpcA
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: vpc-a-ec2-sg
+  VpcAEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VpcAEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref VpcAEc2IamRole
+  VpcAEc2IamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      AccessPolicies:
+        - AccessScope:
+            Type: cluster
+          PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+      ClusterName: !Ref VpcAEksCluster
+      PrincipalArn: !GetAtt VpcAEc2IamRole.Arn
+      Type: STANDARD
+  
+  VpcBEc2: # VPC B
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - VpcACoreNodeGroup
+      - VpcBCoreNodeGroup
+      - TransitGatewayVpcARoute
+      - TransitGatewayVpcBRoute
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref VpcBPublicSubneta
+          GroupSet:
+            - !Ref VpcBEc2SecurityGroup
+            - !GetAtt VpcBEksCluster.ClusterSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: vpc-b-ec2
+      IamInstanceProfile: !Ref VpcBEc2InstanceProfile
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git
+          dnf groupinstall -yq "Development Tools"
+
+          export VSC_VERSION=$(curl -s https://api.github.com/repos/coder/code-server/releases/latest | jq -r '.tag_name | ltrimstr("v")')
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          sudo -Eu ec2-user bash << 'EOF'
+          cd /home/ec2-user
+          mkdir -p /home/ec2-user/bin
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.3/2025-08-03/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          mv kubectl /home/ec2-user/bin/kubectl
+          export PATH=/home/ec2-user/bin:$PATH
+          echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+          echo "alias k=kubectl" >> ~/.bashrc
+          echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+          echo "source <(kubectl completion bash)" >> ~/.bashrc
+          exec bash
+
+          aws eks update-kubeconfig --name ${VpcBEksCluster} --region ${AWS::Region}
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VpcBEc2 --region ${AWS::Region}
+  VpcBEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vpc-b-ec2-sg
+      VpcId: !Ref VpcB
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: vpc-b-ec2-sg
+  VpcBEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VpcBEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref VpcBEc2IamRole
+  VpcBEc2IamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      AccessPolicies:
+        - AccessScope:
+            Type: cluster
+          PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+      ClusterName: !Ref VpcBEksCluster
+      PrincipalArn: !GetAtt VpcBEc2IamRole.Arn
+      Type: STANDARD
+  
+  # Fn::ForEach::EksClusters:
+  #   - Vpc
+  #   - [VpcA, VpcB]
+  #   - ${Vpc}Ec2SsmAssociation:
+  #       Type: AWS::SSM::Association
+  #       DependsOn:
+  #         - !Sub ${Vpc}Ec2 # Required
+  #       Properties:
+  #         Name: AWS-RunShellScript
+  #         WaitForSuccessTimeoutSeconds: 600
+  #         Targets:
+  #           - Key: InstanceIds
+  #             Values:
+  #               - Ref: !Sub ${Vpc}Ec2
+  #         Parameters:
+  #           commands: 
+  #             # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+  #             - !Sub 
+  #               - |
+  #                 su - ec2-user << 'SSMEOF'
+  #                 export HOME=/home/ec2-user
+  #                 cd $HOME
+
+  #                 curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+  #                 sudo mv /tmp/eksctl /usr/local/bin
+
+  #                 curl -fsSL -o /home/ec2-user/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+  #                 chmod 700 /home/ec2-user/get_helm.sh
+  #                 /home/ec2-user/get_helm.sh
+  #                 rm /home/ec2-user/get_helm.sh
+
+  #                 helm repo add eks https://aws.github.io/eks-charts
+  #                 helm repo update eks
+  #                 helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
+  #                 --set clusterName=${VpcAEksCluster} \
+  #                 --set serviceAccount.name=aws-load-balancer-controller \
+  #                 --set region=${AWS::Region} \
+  #                 --set vpcId=${VpcId} \
+  #                 sleep 60
+
+  #                 mkdir -p /home/ec2-user/manifests
+  #                 echo 'apiVersion: apps/v1
+  #                 kind: Deployment
+  #                 metadata:
+  #                   name: nginx
+  #                 spec:
+  #                   selector:
+  #                     matchLabels:
+  #                       app: nginx
+  #                   replicas: 5
+  #                   template:
+  #                     metadata:
+  #                       labels:
+  #                         app: nginx
+  #                     spec:
+  #                       containers:
+  #                       - image: nginx:latest
+  #                         imagePullPolicy: Always
+  #                         name: nginx
+  #                         ports:
+  #                         - containerPort: 80
+  #                 ---
+  #                 apiVersion: v1
+  #                 kind: Service
+  #                 metadata:
+  #                   name: nginx
+  #                 spec:
+  #                   ports:
+  #                     - port: 80
+  #                       targetPort: 80
+  #                       protocol: TCP
+  #                   type: ClusterIP
+  #                   selector:
+  #                     app: nginx
+  #                 ---
+  #                 apiVersion: networking.k8s.io/v1
+  #                 kind: Ingress
+  #                 metadata:
+  #                   name: nginx
+  #                   annotations:
+  #                     alb.ingress.kubernetes.io/scheme: internet-facing
+  #                     alb.ingress.kubernetes.io/target-type: ip
+  #                 spec:
+  #                   ingressClassName: alb
+  #                   rules:
+  #                     - http:
+  #                         paths:
+  #                         - path: /
+  #                           pathType: Prefix
+  #                           backend:
+  #                             service:
+  #                               name: nginx
+  #                               port:
+  #                                 number: 80' > /home/ec2-user/manifests/web.yaml
+  #                 kubectl apply -f /home/ec2-user/manifests/web.yaml
+  #                 SSMEOF
+  #               - VpcId:
+  #                   Ref: !Sub ${Vpc}
+  #               - EksCluster:
+  #                   Ref: !Sub ${Vpc}EksCluster
+
+  VpcAEc2SsmAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - VpcAEc2 # Required
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 600
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - Ref: !Sub VpcAEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              su - ec2-user << 'SSMEOF'
+              export HOME=/home/ec2-user
+              cd $HOME
+
+              curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+              sudo mv /tmp/eksctl /usr/local/bin
+
+              curl -fsSL -o /home/ec2-user/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+              chmod 700 /home/ec2-user/get_helm.sh
+              /home/ec2-user/get_helm.sh
+              rm /home/ec2-user/get_helm.sh
+
+              helm repo add eks https://aws.github.io/eks-charts
+              helm repo update eks
+              helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
+              --set clusterName=${VpcAEksCluster} \
+              --set serviceAccount.name=aws-load-balancer-controller \
+              --set region=${AWS::Region} \
+              --set vpcId=${VpcA}
+              sleep 60
+
+              mkdir -p /home/ec2-user/manifests
+              echo 'apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: nginx
+              spec:
+                selector:
+                  matchLabels:
+                    app: nginx
+                replicas: 5
+                template:
+                  metadata:
+                    labels:
+                      app: nginx
+                  spec:
+                    containers:
+                    - image: nginx:latest
+                      imagePullPolicy: Always
+                      name: nginx
+                      ports:
+                      - containerPort: 80
+              ---
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: nginx
+              spec:
+                ports:
+                  - port: 80
+                    targetPort: 80
+                    protocol: TCP
+                type: ClusterIP
+                selector:
+                  app: nginx
+              ---
+              apiVersion: networking.k8s.io/v1
+              kind: Ingress
+              metadata:
+                name: nginx
+                annotations:
+                  alb.ingress.kubernetes.io/scheme: internet-facing
+                  alb.ingress.kubernetes.io/target-type: ip
+                  alb.ingress.kubernetes.io/security-groups: ${VpcAAlbSecurityGroup}
+                  alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
+              spec:
+                ingressClassName: alb
+                rules:
+                  - http:
+                      paths:
+                      - path: /
+                        pathType: Prefix
+                        backend:
+                          service:
+                            name: nginx
+                            port:
+                              number: 80' > /home/ec2-user/manifests/web.yaml
+              kubectl apply -f /home/ec2-user/manifests/web.yaml
+              SSMEOF
+  
+  VpcBEc2SsmAssociation:
+      Type: AWS::SSM::Association
+      DependsOn:
+        - VpcBEc2 # Required
+      Properties:
+        Name: AWS-RunShellScript
+        WaitForSuccessTimeoutSeconds: 600
+        Targets:
+          - Key: InstanceIds
+            Values:
+              - Ref: !Sub VpcBEc2
+        Parameters:
+          commands: 
+            # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+            - !Sub |
+                su - ec2-user << 'SSMEOF'
+                export HOME=/home/ec2-user
+                cd $HOME
+
+                curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+                sudo mv /tmp/eksctl /usr/local/bin
+
+                curl -fsSL -o /home/ec2-user/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+                chmod 700 /home/ec2-user/get_helm.sh
+                /home/ec2-user/get_helm.sh
+                rm /home/ec2-user/get_helm.sh
+
+                helm repo add eks https://aws.github.io/eks-charts
+                helm repo update eks
+                helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
+                --set clusterName=${VpcBEksCluster} \
+                --set serviceAccount.name=aws-load-balancer-controller \
+                --set region=${AWS::Region} \
+                --set vpcId=${VpcB}
+                sleep 60
+
+                mkdir -p /home/ec2-user/manifests
+                echo 'apiVersion: apps/v1
+                kind: Deployment
+                metadata:
+                  name: nginx
+                spec:
+                  selector:
+                    matchLabels:
+                      app: nginx
+                  replicas: 5
+                  template:
+                    metadata:
+                      labels:
+                        app: nginx
+                    spec:
+                      containers:
+                      - image: nginx:latest
+                        imagePullPolicy: Always
+                        name: nginx
+                        ports:
+                        - containerPort: 80
+                ---
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: nginx
+                spec:
+                  ports:
+                    - port: 80
+                      targetPort: 80
+                      protocol: TCP
+                  type: ClusterIP
+                  selector:
+                    app: nginx
+                ---
+                apiVersion: networking.k8s.io/v1
+                kind: Ingress
+                metadata:
+                  name: nginx
+                  annotations:
+                    alb.ingress.kubernetes.io/scheme: internal
+                    alb.ingress.kubernetes.io/target-type: ip
+                    alb.ingress.kubernetes.io/security-groups: ${VpcBAlbSecurityGroup}
+                    alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
+                spec:
+                  ingressClassName: alb
+                  rules:
+                    - http:
+                        paths:
+                        - path: /
+                          pathType: Prefix
+                          backend:
+                            service:
+                              name: nginx
+                              port:
+                                number: 80' > /home/ec2-user/manifests/web.yaml
+                kubectl apply -f /home/ec2-user/manifests/web.yaml
+                SSMEOF
+  
+  VpcAAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets: 
+        - !Ref VpcAPublicSubneta
+        - !Ref VpcAPublicSubnetc
+      SecurityGroups:
+        - !GetAtt VpcA.DefaultSecurityGroup # Ignored
+      Tags: 
+        - Key: elbv2.k8s.aws/cluster
+          Value: !Ref VpcAEksCluster
+        - Key: ingress.k8s.aws/resource
+          Value: LoadBalancer
+        - Key: ingress.k8s.aws/stack
+          Value: default/nginx
+  VpcAAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vpc-a-alb-sg
+      SecurityGroupIngress:
+        - !If [SecurityGroupInboundFromAnywhere, {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": "0.0.0.0/0"
+          }, !Ref AWS::NoValue]
+      VpcId: !Ref VpcA
+      Tags:
+        - Key: Name
+          Value: vpc-a-alb-sg
+  
+  VpcBAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internal
+      Subnets: 
+        - !Ref VpcBPrivateSubneta
+        - !Ref VpcBPrivateSubnetc
+      SecurityGroups:
+        - !GetAtt VpcB.DefaultSecurityGroup # Ignored
+      Tags: 
+        - Key: elbv2.k8s.aws/cluster
+          Value: !Ref VpcBEksCluster
+        - Key: ingress.k8s.aws/resource
+          Value: LoadBalancer
+        - Key: ingress.k8s.aws/stack
+          Value: default/nginx
+  VpcBAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vpc-b-alb-sg
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !GetAtt VpcA.CidrBlock
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !GetAtt VpcB.CidrBlock
+      VpcId: !Ref VpcB
+      Tags:
+        - Key: Name
+          Value: vpc-b-alb-sg
+
+
+Outputs:
+  VpcAEc2:
+    Value: !Sub http://${VpcAEc2.PublicIp}:8000
+    Description: Public IP Address of the VS Code (VPC A)
+  VpcBEc2:
+    Value: !Sub http://${VpcBEc2.PublicIp}:8000
+    Description: Public IP Address of the VS Code (VPC B)
