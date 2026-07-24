@@ -38,6 +38,13 @@ Mappings:
     c:
       PublicSubnetCidr: 192.168.34.0/24
       PrivateSubnetCidr: 192.168.35.0/24
+  ResourceNameMapping:
+    VpcA:
+      TagValue: vpc-a
+      CrossVpc: VpcB
+    VpcB:
+      TagValue: vpc-b
+      CrossVpc: VpcA
 
 Resources:
   KeyPair:
@@ -91,7 +98,7 @@ Resources:
   VpcAPublicPeerRoute:
     Type: AWS::EC2::Route
     DependsOn:
-      - TransitGatewayVpcBAttachment
+      - TransitGatewayVpcAAttachment
     Properties:
       RouteTableId: !Ref VpcAPublicRouteTable
       DestinationCidrBlock: !GetAtt VpcB.CidrBlock
@@ -182,7 +189,7 @@ Resources:
       VpcAPrivatePeerRoute${Az}:
         Type: AWS::EC2::Route
         DependsOn:
-          - TransitGatewayVpcBAttachment
+          - TransitGatewayVpcAAttachment
         Properties:
           RouteTableId:
             Ref: !Sub VpcAPrivateRouteTable${Az}
@@ -377,7 +384,7 @@ Resources:
       VpcBPrivatePeerRoute${Az}:
         Type: AWS::EC2::Route
         DependsOn:
-          - TransitGatewayVpcAAttachment
+          - TransitGatewayVpcBAttachment
         Properties:
           RouteTableId:
             Ref: !Sub VpcBPrivateRouteTable${Az}
@@ -458,195 +465,122 @@ Resources:
       Tags:
         - Key: Name
           Value: tgw-rt
-  TransitGatewayVpcAAttachment:
-    Type: AWS::EC2::TransitGatewayAttachment
-    Properties:
-      TransitGatewayId: !Ref TransitGateway
-      VpcId: !Ref VpcA
-      SubnetIds:
-        - !Ref VpcAPrivateSubneta
-        - !Ref VpcAPrivateSubnetc
-      Tags:
-        - Key: Name
-          Value: tgw-vpc-a
-  TransitGatewayVpcBAttachment:
-    Type: AWS::EC2::TransitGatewayAttachment
-    Properties:
-      TransitGatewayId: !Ref TransitGateway
-      VpcId: !Ref VpcB
-      SubnetIds:
-        - !Ref VpcBPrivateSubneta
-        - !Ref VpcBPrivateSubnetc
-      Tags:
-        - Key: Name
-          Value: tgw-vpc-b
-  TransitGatewayVpcAAttachmentAssociation:
-    Type: AWS::EC2::TransitGatewayRouteTableAssociation
-    Properties:
-      TransitGatewayAttachmentId: !Ref TransitGatewayVpcAAttachment
-      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
-  TransitGatewayVpcBAttachmentAssociation:
-    Type: AWS::EC2::TransitGatewayRouteTableAssociation
-    Properties:
-      TransitGatewayAttachmentId: !Ref TransitGatewayVpcBAttachment
-      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
-  TransitGatewayVpcARoute:
-    Type: AWS::EC2::TransitGatewayRoute
-    Properties:
-      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
-      TransitGatewayAttachmentId: !Ref TransitGatewayVpcAAttachment
-      DestinationCidrBlock: !GetAtt VpcA.CidrBlock
-  TransitGatewayVpcBRoute:
-    Type: AWS::EC2::TransitGatewayRoute
-    Properties:
-      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
-      TransitGatewayAttachmentId: !Ref TransitGatewayVpcBAttachment
-      DestinationCidrBlock: !GetAtt VpcB.CidrBlock
-
-  VpcAEksCluster: # VPC A
-    Type: AWS::EKS::Cluster
-    Properties:
-      Version: !Ref KubernetesVersion
-      AccessConfig:
-        AuthenticationMode: API_AND_CONFIG_MAP
-        BootstrapClusterCreatorAdminPermissions: true
-      BootstrapSelfManagedAddons: false
-      Logging:
-        ClusterLogging:
-          EnabledTypes:
-            - Type: api
-            - Type: audit
-            - Type: authenticator
-            - Type: controllerManager
-            - Type: scheduler
-      ResourcesVpcConfig:
-        EndpointPrivateAccess: true
-        EndpointPublicAccess: false
-        SubnetIds:
-          - !Ref VpcAClusterSubneta
-          - !Ref VpcAClusterSubnetc
-      RoleArn: !GetAtt EksClusterIamRole.Arn
-      KubernetesNetworkConfig:
-        IpFamily: ipv4
-        ServiceIpv4Cidr: 172.20.0.0/16
-  VpcAVpcCniAddOn:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: vpc-cni
-      ClusterName: !Ref VpcAEksCluster
-  VpcAKubeProxyAddOn:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: kube-proxy
-      ClusterName: !Ref VpcAEksCluster
-  VpcACoreDnsAddOn:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: coredns
-      ClusterName: !Ref VpcAEksCluster
-  VpcAPodIdentityAgentAddon:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: eks-pod-identity-agent
-      ClusterName: !Ref VpcAEksCluster
-  VpcAAwsLoadBalancerControllerRolePodIdentityAssociation:
-    Type: AWS::EKS::PodIdentityAssociation
-    Properties:
-      ClusterName: !Ref VpcAEksCluster
-      Namespace: kube-system
-      RoleArn: !GetAtt AwsLoadBalancerControllerRole.Arn
-      ServiceAccount: aws-load-balancer-controller
-  VpcACoreNodeGroup:
-    Type: AWS::EKS::Nodegroup
-    Properties:
-      NodegroupName: core-nodegroup
-      AmiType: AL2023_x86_64_STANDARD
-      InstanceTypes:
-        - t3.medium
-      CapacityType: ON_DEMAND
-      ClusterName: !Ref VpcAEksCluster
-      ForceUpdateEnabled: true
-      NodeRole: !GetAtt EksNodeIamRole.Arn
-      ScalingConfig:
-        DesiredSize: 2
-        MaxSize: 4
-        MinSize: 2
-      Subnets:
-        - !Ref VpcANodeSubneta
-        - !Ref VpcANodeSubnetc
+  Fn::ForEach::TransitGatewayRoutes:
+    - Vpc
+    - [VpcA, VpcB]
+    - TransitGateway${Vpc}Attachment:
+        Type: AWS::EC2::TransitGatewayAttachment
+        Properties:
+          TransitGatewayId: !Ref TransitGateway
+          VpcId:
+            Ref: !Sub ${Vpc}
+          SubnetIds:
+            - Ref:
+                !Sub ${Vpc}PrivateSubneta
+            - Ref: 
+                !Sub ${Vpc}PrivateSubnetc
+          Tags:
+            - Key: Name
+              Value: !Sub
+                - tgw-${VpcName}
+                - VpcName : !FindInMap [ResourceNameMapping, !Ref Vpc, TagValue]
+      TransitGateway${Vpc}AttachmentAssociation:
+        Type: AWS::EC2::TransitGatewayRouteTableAssociation
+        Properties:
+          TransitGatewayAttachmentId:
+            Ref: !Sub TransitGateway${Vpc}Attachment
+          TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+      TransitGateway${Vpc}Route:
+        Type: AWS::EC2::TransitGatewayRoute
+        Properties:
+          TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+          TransitGatewayAttachmentId:
+            Ref: !Sub TransitGateway${Vpc}Attachment
+          DestinationCidrBlock:
+            Fn::GetAtt: 
+              - !Ref Vpc
+              - CidrBlock
   
-  VpcBEksCluster: # VPC A
-    Type: AWS::EKS::Cluster
-    Properties:
-      Version: !Ref KubernetesVersion
-      AccessConfig:
-        AuthenticationMode: API_AND_CONFIG_MAP
-        BootstrapClusterCreatorAdminPermissions: true
-      BootstrapSelfManagedAddons: false
-      Logging:
-        ClusterLogging:
-          EnabledTypes:
-            - Type: api
-            - Type: audit
-            - Type: authenticator
-            - Type: controllerManager
-            - Type: scheduler
-      ResourcesVpcConfig:
-        EndpointPrivateAccess: true
-        EndpointPublicAccess: false
-        SubnetIds:
-          - !Ref VpcBClusterSubneta
-          - !Ref VpcBClusterSubnetc
-      RoleArn: !GetAtt EksClusterIamRole.Arn
-      KubernetesNetworkConfig:
-        IpFamily: ipv4
-        ServiceIpv4Cidr: 172.20.0.0/16
-  VpcBVpcCniAddOn:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: vpc-cni
-      ClusterName: !Ref VpcBEksCluster
-  VpcBKubeProxyAddOn:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: kube-proxy
-      ClusterName: !Ref VpcBEksCluster
-  VpcBCoreDnsAddOn:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: coredns
-      ClusterName: !Ref VpcBEksCluster
-  VpcBPodIdentityAgentAddon:
-    Type: AWS::EKS::Addon
-    Properties:
-      AddonName: eks-pod-identity-agent
-      ClusterName: !Ref VpcBEksCluster
-  VpcBAwsLoadBalancerControllerRolePodIdentityAssociation:
-    Type: AWS::EKS::PodIdentityAssociation
-    Properties:
-      ClusterName: !Ref VpcBEksCluster
-      Namespace: kube-system
-      RoleArn: !GetAtt AwsLoadBalancerControllerRole.Arn
-      ServiceAccount: aws-load-balancer-controller
-  VpcBCoreNodeGroup:
-    Type: AWS::EKS::Nodegroup
-    Properties:
-      NodegroupName: core-nodegroup
-      AmiType: AL2023_x86_64_STANDARD
-      InstanceTypes:
-        - t3.medium
-      CapacityType: ON_DEMAND
-      ClusterName: !Ref VpcBEksCluster
-      ForceUpdateEnabled: true
-      NodeRole: !GetAtt EksNodeIamRole.Arn
-      ScalingConfig:
-        DesiredSize: 2
-        MaxSize: 4
-        MinSize: 2
-      Subnets:
-        - !Ref VpcBNodeSubneta
-        - !Ref VpcBNodeSubnetc
-
+  Fn::ForEach::EksClusters:
+    - Vpc
+    - [VpcA, VpcB]
+    - ${Vpc}EksCluster:
+        Type: AWS::EKS::Cluster
+        Properties:
+          Version: !Ref KubernetesVersion
+          AccessConfig:
+            AuthenticationMode: API_AND_CONFIG_MAP
+            BootstrapClusterCreatorAdminPermissions: true
+          BootstrapSelfManagedAddons: false
+          Logging:
+            ClusterLogging:
+              EnabledTypes:
+                - Type: api
+                - Type: audit
+                - Type: authenticator
+                - Type: controllerManager
+                - Type: scheduler
+          ResourcesVpcConfig:
+            EndpointPrivateAccess: true
+            EndpointPublicAccess: false
+            SubnetIds:
+              - Ref: !Sub ${Vpc}ClusterSubneta
+              - Ref: !Sub ${Vpc}ClusterSubnetc
+          RoleArn: !GetAtt EksClusterIamRole.Arn
+          KubernetesNetworkConfig:
+            IpFamily: ipv4
+            ServiceIpv4Cidr: 172.20.0.0/16
+      ${Vpc}VpcCniAddOn:
+        Type: AWS::EKS::Addon
+        Properties:
+          AddonName: vpc-cni
+          ClusterName:
+            Ref: !Sub ${Vpc}EksCluster
+      ${Vpc}KubeProxyAddOn:
+        Type: AWS::EKS::Addon
+        Properties:
+          AddonName: kube-proxy
+          ClusterName:
+            Ref: !Sub ${Vpc}EksCluster
+      ${Vpc}CoreDnsAddOn:
+        Type: AWS::EKS::Addon
+        Properties:
+          AddonName: coredns
+          ClusterName:
+            Ref: !Sub ${Vpc}EksCluster
+      ${Vpc}PodIdentityAgentAddon:
+        Type: AWS::EKS::Addon
+        Properties:
+          AddonName: eks-pod-identity-agent
+          ClusterName:
+            Ref: !Sub ${Vpc}EksCluster
+      ${Vpc}AwsLoadBalancerControllerRolePodIdentityAssociation:
+        Type: AWS::EKS::PodIdentityAssociation
+        Properties:
+          ClusterName: 
+            Ref: !Sub ${Vpc}EksCluster
+          Namespace: kube-system
+          RoleArn: !GetAtt AwsLoadBalancerControllerRole.Arn
+          ServiceAccount: aws-load-balancer-controller
+      ${Vpc}CoreNodeGroup:
+        Type: AWS::EKS::Nodegroup
+        Properties:
+          NodegroupName: core-nodegroup
+          AmiType: AL2023_x86_64_STANDARD
+          InstanceTypes:
+            - t3.medium
+          CapacityType: ON_DEMAND
+          ClusterName: 
+            Ref: !Sub ${Vpc}EksCluster
+          ForceUpdateEnabled: true
+          NodeRole: !GetAtt EksNodeIamRole.Arn
+          ScalingConfig:
+            DesiredSize: 2
+            MaxSize: 4
+            MinSize: 2
+          Subnets:
+            - Ref: !Sub ${Vpc}NodeSubneta
+            - Ref: !Sub ${Vpc}NodeSubnetc
   EksClusterIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -987,7 +921,7 @@ Resources:
       Targets:
         - Key: InstanceIds
           Values:
-            - Ref: !Sub VpcAEc2
+            - !Ref VpcAEc2
       Parameters:
         commands: 
           # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
@@ -1055,8 +989,7 @@ Resources:
                 annotations:
                   alb.ingress.kubernetes.io/scheme: internet-facing
                   alb.ingress.kubernetes.io/target-type: ip
-                  alb.ingress.kubernetes.io/security-groups: ${VpcAAlbSecurityGroup}
-                  alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
+                  alb.ingress.kubernetes.io/security-groups: ${VpcAAlbSecurityGroup}, ${VpcAEksCluster.ClusterSecurityGroupId}
               spec:
                 ingressClassName: alb
                 rules:
@@ -1070,102 +1003,119 @@ Resources:
                             port:
                               number: 80' > /home/ec2-user/manifests/web.yaml
               kubectl apply -f /home/ec2-user/manifests/web.yaml
+
+              echo "# Cross-VPC
+
+              # VPC A - EKS Cluster Ingress (ALB)
+              curl http://${VpcAAlb.DNSName}
+
+              # VPC B - EKS Cluster Ingress (ALB)
+              curl http://${VpcBAlb.DNSName}
+              " > /home/ec2-user/README.md
               SSMEOF
   
   VpcBEc2SsmAssociation:
-      Type: AWS::SSM::Association
-      DependsOn:
-        - VpcBEc2 # Required
-      Properties:
-        Name: AWS-RunShellScript
-        WaitForSuccessTimeoutSeconds: 600
-        Targets:
-          - Key: InstanceIds
-            Values:
-              - Ref: !Sub VpcBEc2
-        Parameters:
-          commands: 
-            # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
-            - !Sub |
-                su - ec2-user << 'SSMEOF'
-                export HOME=/home/ec2-user
-                cd $HOME
+    Type: AWS::SSM::Association
+    DependsOn:
+      - VpcBEc2 # Required
+    Properties:
+      Name: AWS-RunShellScript
+      WaitForSuccessTimeoutSeconds: 600
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref VpcBEc2
+      Parameters:
+        commands: 
+          # uid=0(root) gid=0(root) groups=0(root) context=system_u:system_r:unconfined_service_t:s0
+          - !Sub |
+              su - ec2-user << 'SSMEOF'
+              export HOME=/home/ec2-user
+              cd $HOME
 
-                curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-                sudo mv /tmp/eksctl /usr/local/bin
+              curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+              sudo mv /tmp/eksctl /usr/local/bin
 
-                curl -fsSL -o /home/ec2-user/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
-                chmod 700 /home/ec2-user/get_helm.sh
-                /home/ec2-user/get_helm.sh
-                rm /home/ec2-user/get_helm.sh
+              curl -fsSL -o /home/ec2-user/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+              chmod 700 /home/ec2-user/get_helm.sh
+              /home/ec2-user/get_helm.sh
+              rm /home/ec2-user/get_helm.sh
 
-                helm repo add eks https://aws.github.io/eks-charts
-                helm repo update eks
-                helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
-                --set clusterName=${VpcBEksCluster} \
-                --set serviceAccount.name=aws-load-balancer-controller \
-                --set region=${AWS::Region} \
-                --set vpcId=${VpcB}
-                sleep 60
+              helm repo add eks https://aws.github.io/eks-charts
+              helm repo update eks
+              helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
+              --set clusterName=${VpcBEksCluster} \
+              --set serviceAccount.name=aws-load-balancer-controller \
+              --set region=${AWS::Region} \
+              --set vpcId=${VpcB}
+              sleep 60
 
-                mkdir -p /home/ec2-user/manifests
-                echo 'apiVersion: apps/v1
-                kind: Deployment
-                metadata:
-                  name: nginx
-                spec:
-                  selector:
-                    matchLabels:
-                      app: nginx
-                  replicas: 5
-                  template:
-                    metadata:
-                      labels:
-                        app: nginx
-                    spec:
-                      containers:
-                      - image: nginx:latest
-                        imagePullPolicy: Always
-                        name: nginx
-                        ports:
-                        - containerPort: 80
-                ---
-                apiVersion: v1
-                kind: Service
-                metadata:
-                  name: nginx
-                spec:
-                  ports:
-                    - port: 80
-                      targetPort: 80
-                      protocol: TCP
-                  type: ClusterIP
-                  selector:
+              mkdir -p /home/ec2-user/manifests
+              echo 'apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: nginx
+              spec:
+                selector:
+                  matchLabels:
                     app: nginx
-                ---
-                apiVersion: networking.k8s.io/v1
-                kind: Ingress
-                metadata:
-                  name: nginx
-                  annotations:
-                    alb.ingress.kubernetes.io/scheme: internal
-                    alb.ingress.kubernetes.io/target-type: ip
-                    alb.ingress.kubernetes.io/security-groups: ${VpcBAlbSecurityGroup}
-                    alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
-                spec:
-                  ingressClassName: alb
-                  rules:
-                    - http:
-                        paths:
-                        - path: /
-                          pathType: Prefix
-                          backend:
-                            service:
-                              name: nginx
-                              port:
-                                number: 80' > /home/ec2-user/manifests/web.yaml
-                kubectl apply -f /home/ec2-user/manifests/web.yaml
-                SSMEOF
+                replicas: 5
+                template:
+                  metadata:
+                    labels:
+                      app: nginx
+                  spec:
+                    containers:
+                    - image: nginx:latest
+                      imagePullPolicy: Always
+                      name: nginx
+                      ports:
+                      - containerPort: 80
+              ---
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: nginx
+              spec:
+                ports:
+                  - port: 80
+                    targetPort: 80
+                    protocol: TCP
+                type: ClusterIP
+                selector:
+                  app: nginx
+              ---
+              apiVersion: networking.k8s.io/v1
+              kind: Ingress
+              metadata:
+                name: nginx
+                annotations:
+                  alb.ingress.kubernetes.io/scheme: internal
+                  alb.ingress.kubernetes.io/target-type: ip
+                  alb.ingress.kubernetes.io/security-groups: ${VpcBAlbSecurityGroup}, ${VpcBEksCluster.ClusterSecurityGroupId}
+              spec:
+                ingressClassName: alb
+                rules:
+                  - http:
+                      paths:
+                      - path: /
+                        pathType: Prefix
+                        backend:
+                          service:
+                            name: nginx
+                            port:
+                              number: 80' > /home/ec2-user/manifests/web.yaml
+              kubectl apply -f /home/ec2-user/manifests/web.yaml
+
+              echo "# Cross-VPC
+
+              # VPC A - EKS Cluster Ingress (ALB)
+              curl http://${VpcAAlb.DNSName}
+
+              # VPC B - EKS Cluster Ingress (ALB)
+              curl http://${VpcBAlb.DNSName}
+              " > /home/ec2-user/README.md
+              SSMEOF
   
   VpcAAlb:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -1236,7 +1186,6 @@ Resources:
       Tags:
         - Key: Name
           Value: vpc-b-alb-sg
-
 
 Outputs:
   VpcAEc2:
