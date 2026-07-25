@@ -10,7 +10,9 @@
   {
     "mcpServers": {
       "eks-mcp-server-remote": {
-        "url": "https://${McpServerAlb.DNSName}",
+        "url": "https://mcp.${McpServerDomain}/mcp",
+        "type": "streamable-http",
+        "autoApprove": ["*"],
         "disabled": false
       }
     }
