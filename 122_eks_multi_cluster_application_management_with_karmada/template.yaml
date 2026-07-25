@@ -1,0 +1,287 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  ClusterNamePrefix:
+    Type: String
+    Default: karmada
+    Description: Prefix used for the EKS cluster names (parent and members)
+  MemberClusterCount:
+    Type: String
+    Default: "2"
+    AllowedValues: ["0", "1", "2", "3", "4"]
+    Description: Number of member clusters to create and join to Karmada (>=2 required for the sample demo workload)
+  KubernetesVersion:
+    Type: String
+    Default: latest
+    AllowedValues: ["latest", "1.32", "1.33", "1.34", "1.35", "1.36"]
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping:
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.10.0/24
+    c:
+      PublicSubnetCidr: 10.0.1.0/24
+      PrivateSubnetCidr: 10.0.11.0/24
+    d:
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.12.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: !Ref ClusterNamePrefix
+
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, c, d]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: public-rt
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - VpcInternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, c, d]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      NatgatewayElasticIp${Az}:
+        Type: AWS::EC2::EIP
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PrivateSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PrivateSubnet${Az}
+  PrivateSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: private-rt
+  PrivateSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+      RouteTableId: !Ref PrivateSubnetRouteTable
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn:
+      - VpcInternetGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityMode: regional
+      AvailabilityZoneAddresses:
+        - AvailabilityZone: !Sub ${AWS::Region}a
+          AllocationIds:
+            - !GetAtt NatgatewayElasticIpa.AllocationId
+        - AvailabilityZone: !Sub ${AWS::Region}c
+          AllocationIds:
+            - !GetAtt NatgatewayElasticIpc.AllocationId
+      Tags:
+        - Key: Name
+          Value: regional-natgw
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    # CreationPolicy:
+    #   ResourceSignal:
+    #     Count: '1'
+    #     Timeout: PT60M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.large
+      KeyName: !Ref KeyPair
+      SubnetId: !Ref PublicSubneta
+      SecurityGroupIds:
+        - !Ref VsCodeEc2SecurityGroup
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: vscode
+      UserData:
+        # tail -f /home/ec2-user/karmada-deploy.log
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git bind-utils jq unzip tar gzip
+
+          export VSC_VERSION=$(curl -s https://api.github.com/repos/coder/code-server/releases/latest | jq -r '.tag_name | ltrimstr("v")')
+          wget -q https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          sudo -Eu ec2-user bash << EOF
+          cd /home/ec2-user
+
+          mkdir -p /home/ec2-user/bin
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.3/2025-08-03/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          mv kubectl /home/ec2-user/bin/kubectl
+          export PATH=/home/ec2-user/bin:$PATH
+          echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+          echo "alias k=kubectl" >> ~/.bashrc
+          echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+          echo "source <(kubectl completion bash)" >> ~/.bashrc
+          exec bash
+
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+
+          curl -fsSL -o /home/ec2-user/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+          chmod 700 /home/ec2-user/get_helm.sh
+          /home/ec2-user/get_helm.sh
+          rm /home/ec2-user/get_helm.sh
+
+          git clone https://github.com/aws-solutions-library-samples/guidance-for-multi-cluster-application-management-with-karmada-and-amazon-eks.git
+          cd /home/ec2-user/guidance-for-multi-cluster-application-management-with-karmada-and-amazon-eks/eks-karmada-deploy
+          # https://etcd.io/docs/v3.6/op-guide/kubernetes/
+          # https://github.com/etcd-io/etcd/issues/13524
+          sed -i 's/--etcd-replicas 3/--etcd-replicas 1/' /home/ec2-user/guidance-for-multi-cluster-application-management-with-karmada-and-amazon-eks/eks-karmada-deploy/include/deploy-karmada-functions.sh
+          chmod +x deploy-karmada-run.sh
+          ./deploy-karmada-run.sh -r ${AWS::Region} -v ${ClusterNamePrefix} -c ${ClusterNamePrefix} -s ${MemberClusterCount} -e ${KubernetesVersion} -k /home/ec2-user -u -t > /home/ec2-user/karmada-deploy.log 2>&1
+
+          echo "# EKS & Karmada
+          
+          Once the deployment completes, use "kubectl --kubeconfig /home/ec2-user/.karmada/karmada-apiserver.config get clusters" on the management host to check the state of the registered member clusters.
+          " > /home/ec2-user/README.md
+          EOF
+
+          # /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: vscode-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 8000,
+          "ToPort": 8000,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: vscode-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref VsCodeEc2IamRole
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${VsCodeEc2.PublicIp}:8000
+    Description: Public IP Address of the VS Code
