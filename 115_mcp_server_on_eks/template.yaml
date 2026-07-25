@@ -1,0 +1,835 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  McpServerDomain:
+    Type: String
+    Description: Keycloak Domain Name (Public Hosted Zone should be already created)
+    Default: example.com
+    AllowedPattern: ".+"
+    ConstraintDescription: "Parameter [McpServerDomain] is empty"
+  McpServerRoute53HostedZone:
+    Type: AWS::Route53::HostedZone::Id
+    Description: EKS MCP Server Domain Name (Public Hosted Zone should be already created)
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  KubernetesVersion:
+    Description: EKS Cluster Kubernetes Version (1.XX)
+    Type: String
+    Default: "1.36"
+    AllowedValues: ["1.32", "1.33", "1.34", "1.35", "1.36"]
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping:
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    c:
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, c]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId: !Ref
+            Fn::Sub: PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - VpcInternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, c]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      NatgatewayElasticIp${Az}:
+        Type: AWS::EC2::EIP
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PrivateSubnetRouteTable
+          SubnetId: !Ref
+            Fn::Sub: PrivateSubnet${Az}
+  PrivateSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: private-rt
+  PrivateSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+      RouteTableId: !Ref PrivateSubnetRouteTable
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn:
+      - VpcInternetGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityMode: regional
+      AvailabilityZoneAddresses:
+        - AvailabilityZone: !Sub ${AWS::Region}a
+          AllocationIds:
+            - !GetAtt NatgatewayElasticIpa.AllocationId
+        - AvailabilityZone: !Sub ${AWS::Region}c
+          AllocationIds:
+            - !GetAtt NatgatewayElasticIpc.AllocationId
+      Tags:
+        - Key: Name
+          Value: regional-natgw
+
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Version: !Ref KubernetesVersion
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      BootstrapSelfManagedAddons: false
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      ResourcesVpcConfig:
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: true
+        SubnetIds:
+          - !Ref PublicSubneta
+          - !Ref PublicSubnetc
+          - !Ref PrivateSubneta
+          - !Ref PrivateSubnetc
+      RoleArn: !GetAtt EksClusterIamRole.Arn
+  EksClusterIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  VpcCniAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: vpc-cni
+      ClusterName: !Ref EksCluster
+  KubeProxyAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: kube-proxy
+      ClusterName: !Ref EksCluster
+  CoreDnsAddOn:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: coredns
+      ClusterName: !Ref EksCluster
+  PodIdentityAgentAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: eks-pod-identity-agent
+      ClusterName: !Ref EksCluster
+
+  CoreNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: al2023
+      AmiType: AL2023_x86_64_STANDARD
+      InstanceTypes:
+        - t3.medium
+      CapacityType: ON_DEMAND
+      ClusterName: !Ref EksCluster
+      ForceUpdateEnabled: true
+      NodeRole: !GetAtt EksNodeIamRole.Arn
+      ScalingConfig:
+        DesiredSize: 2
+        MaxSize: 4
+        MinSize: 2
+      Subnets:
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetc
+      LaunchTemplate:
+        Id: !Ref CoreLaunchTemplate
+  CoreLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: core-nodegroup-launchtemplate
+      LaunchTemplateData:
+        KeyName: !Ref KeyPair
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: core
+  EksNodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  AwsLoadBalancerControllerRole:
+    # https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/docs/install/iam_policy.json
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: AWSLoadBalancerControllerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - ec2:*
+                  - elasticloadbalancing:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cognito-idp:DescribeUserPoolClient
+                  - acm:ListCertificates
+                  - acm:DescribeCertificate
+                  - iam:ListServerCertificates
+                  - iam:GetServerCertificate
+                  - waf-regional:GetWebACL
+                  - waf-regional:GetWebACLForResource
+                  - waf-regional:AssociateWebACL
+                  - waf-regional:DisassociateWebACL
+                  - wafv2:GetWebACL
+                  - wafv2:GetWebACLForResource
+                  - wafv2:AssociateWebACL
+                  - wafv2:DisassociateWebACL
+                  - shield:GetSubscriptionState
+                  - shield:DescribeProtection
+                  - shield:CreateProtection
+                  - shield:DeleteProtection
+                Resource: '*'
+  AwsLoadBalancerControllerRolePodIdentityAssociation:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Ref EksCluster
+      Namespace: kube-system
+      RoleArn: !GetAtt AwsLoadBalancerControllerRole.Arn
+      ServiceAccount: aws-load-balancer-controller
+
+  Ecr:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Delete
+    Properties:
+      RepositoryName: eks-mcp-server
+      ImageTagMutability: MUTABLE
+      EmptyOnDelete: true
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: image-builder
+      ServiceRole: !GetAtt CodeBuildIamRole.Arn
+      TimeoutInMinutes: 30
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        PrivilegedMode: true
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - |
+                  cat << 'DOCKERFILE_EOF' > Dockerfile
+                  FROM ghcr.io/sparfenyuk/mcp-proxy:latest
+
+                  RUN python3 -m ensurepip --upgrade && pip install --no-cache-dir uv
+                  ENV PATH="/root/.local/bin:/usr/local/bin:$PATH" \
+                  UV_PYTHON_PREFERENCE=only-system \
+                  UV_PYTHON_DOWNLOADS=never \
+                  UV_COMPILE_BYTECODE=0 \
+                  PYTHONUNBUFFERED=1
+
+                  RUN uv tool install "awslabs.eks-mcp-server"
+
+                  HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+
+                  CMD wget -qO- http://localhost:8000/status || exit 1
+
+                  ENTRYPOINT ["catatonit", "--", "mcp-proxy"]
+
+                  EXPOSE 8000
+
+                  CMD [ \
+                  "--host", "0.0.0.0", \
+                  "--port", "8000", \
+                  "--pass-environment", \
+                  "--allow-origin", "*", \
+                  "--log-level", "INFO", \
+                  "--", \
+                  "uvx", "awslabs.eks-mcp-server", \
+                  "--allow-write", \
+                  "--allow-sensitive-data-access" \
+                  ]
+                  DOCKERFILE_EOF
+            pre_build:
+              commands:
+                - aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+            build:
+              commands:
+                - docker build -t mcp-server-on-eks:latest .
+                - docker tag mcp-server-on-eks:latest ${Ecr.RepositoryUri}:latest
+            post_build:
+              commands:
+                - docker push ${Ecr.RepositoryUri}:latest
+  CodeBuildIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: McpServerImageBuildProjectPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: !GetAtt Ecr.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/image-builder*
+
+  EcrImageBuildAndPush:
+    Type: Custom::CodeBuildTrigger
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+      CodeBuildProject: !Ref CodeBuildProject
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.14
+      Handler: index.handler
+      Role: !GetAtt LambdaFunctionIamRole.Arn
+      Timeout: 900
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          import json
+          import time
+          import urllib.request
+          import boto3
+
+          codebuild = boto3.client("codebuild")
+
+          def handler(event, context):
+            print(f"Event: {json.dumps(event)}")
+            request_type = event["RequestType"]
+            if request_type == "Delete":
+              send(event, "SUCCESS", {})
+              return
+
+            props = event["ResourceProperties"]
+            project_name = props["CodeBuildProject"]
+            env_overrides = props.get("EnvironmentVariablesOverride", [])
+
+            try:
+              start = codebuild.start_build(
+                projectName=project_name,
+                environmentVariablesOverride=env_overrides,
+              )
+              build_id = start["build"]["id"]
+              print(f"Started build {build_id} for project {project_name}")
+
+              deadline = time.time() + 14 * 60
+              status = "IN_PROGRESS"
+              while time.time() < deadline:
+                builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+                status = builds[0]["buildStatus"]
+                print(f"Build status: {status}")
+                if status != "IN_PROGRESS":
+                  break
+                time.sleep(20)
+              if status == "SUCCEEDED":
+                send(event, "SUCCESS", {"BuildId": build_id}, physical_id=build_id)
+              else:
+                send(event, "FAILED", {}, reason=f"Build {build_id} ended with status: {status}", physical_id=build_id)
+            except Exception as error:
+              print(f"Error: {error}")
+              send(event, "FAILED", {}, reason=str(error))
+
+          def send(event, status, data, reason=None, physical_id=None):
+            body = json.dumps(
+              {
+                "Status": status,
+                "Reason": reason or "See CloudWatch Logs for details",
+                "PhysicalResourceId": physical_id or event.get("PhysicalResourceId") or event["RequestId"],
+                "StackId": event["StackId"],
+                "RequestId": event["RequestId"],
+                "LogicalResourceId": event["LogicalResourceId"],
+                "Data": data,
+              }
+            ).encode("utf-8")
+
+            request = urllib.request.Request(
+              event["ResponseURL"],
+              data=body,
+              method="PUT",
+              headers={"Content-Type": "", "Content-Length": str(len(body))},
+            )
+            urllib.request.urlopen(request)
+  LambdaFunctionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CodeBuildTriggerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource:
+                  - !GetAtt CodeBuildProject.Arn
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - CoreNodeGroup
+      - AwsLoadBalancerControllerRolePodIdentityAssociation
+      - McpServerPodRolePodIdentityAssociation
+      - McpServerPodIamAccessEntry
+      - EcrImageBuildAndPush
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet:
+            - !GetAtt EksCluster.ClusterSecurityGroupId
+            - !Ref VsCodeEc2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        !Base64
+        Fn::Sub: |
+          #!/bin/bash
+          dnf update -yq
+          dnf install -yq git unzip
+
+          sudo -Eu ec2-user bash << 'EOF'
+          cd /home/ec2-user
+          mkdir -p /home/ec2-user/bin
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.3/2025-08-03/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          mv kubectl /home/ec2-user/bin/kubectl
+          export PATH=/home/ec2-user/bin:$PATH
+          echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+
+          curl -fsSL -o /home/ec2-user/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 /home/ec2-user/get_helm.sh
+          /home/ec2-user/get_helm.sh
+          rm /home/ec2-user/get_helm.sh
+
+          aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}
+
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update eks
+          helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --wait \
+          --set clusterName=${EksCluster} \
+          --set serviceAccount.name=aws-load-balancer-controller \
+          --set region=${AWS::Region} \
+          --set vpcId=${Vpc}
+          sleep 30
+
+          mkdir -p /home/ec2-user/manifests
+          cat << 'MANIFEST_EOF' > /home/ec2-user/manifests/mcp.yaml
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: eks-mcp-server
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: eks-mcp-server
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: eks-mcp-server
+            template:
+              metadata:
+                labels:
+                  app: eks-mcp-server
+              spec:
+                serviceAccountName: eks-mcp-server
+                containers:
+                  - name: mcp-server
+                    image: ${Ecr.RepositoryUri}:latest
+                    imagePullPolicy: Always
+                    ports:
+                      - containerPort: 8000
+                    readinessProbe:
+                      httpGet:
+                        path: /status
+                        port: 8000
+                      initialDelaySeconds: 10
+                      periodSeconds: 15
+                    livenessProbe:
+                      httpGet:
+                        path: /status
+                        port: 8000
+                      initialDelaySeconds: 15
+                      periodSeconds: 30
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: mcp
+          spec:
+            type: ClusterIP
+            selector:
+              app: eks-mcp-server
+            ports:
+              - port: 8000
+                targetPort: 8000
+          ---
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: mcp
+            annotations:
+              alb.ingress.kubernetes.io/scheme: internet-facing
+              alb.ingress.kubernetes.io/target-type: ip
+              alb.ingress.kubernetes.io/security-groups: ${AlbSecurityGroup}, ${EksCluster.ClusterSecurityGroupId}
+              alb.ingress.kubernetes.io/healthcheck-path: /status
+              alb.ingress.kubernetes.io/healthcheck-port: "8000"
+              alb.ingress.kubernetes.io/ssl-redirect: "443"
+              alb.ingress.kubernetes.io/certificate-arn: ${AcmCertificate}
+          spec:
+            ingressClassName: alb
+            rules:
+              - http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: mcp
+                          port:
+                            number: 8000
+          MANIFEST_EOF
+          kubectl apply -f /home/ec2-user/manifests/mcp.yaml
+          kubectl rollout status deployment mcp-server-on-eks -n default --timeout=120s
+          EOF
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for the VS Code
+      GroupName: vscode-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: !If
+        - SecurityGroupInboundFromAnywhere
+        - - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+        - []
+      Tags:
+        - Key: Name
+          Value: mcp-server-bastion-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: EksUpdateKubeconfig
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: eks:DescribeCluster
+                Resource: !GetAtt EksCluster.Arn
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref VsCodeEc2IamRole
+  VsCodeEc2IamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      AccessPolicies:
+        - AccessScope:
+            Type: cluster
+          PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt VsCodeEc2IamRole.Arn
+      Type: STANDARD
+
+  # https://github.com/awslabs/mcp/blob/main/src/eks-mcp-server/README.md
+  McpServerPodRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/IAMFullAccess
+        - arn:aws:iam::aws:policy/AmazonVPCFullAccess
+        - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+      Policies:
+        - PolicyName: EksMcpServerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: eks:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricData
+                  - logs:StartQuery
+                  - logs:GetQueryResults
+                Resource: "*"
+  McpServerPodRolePodIdentityAssociation:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Ref EksCluster
+      Namespace: default
+      RoleArn: !GetAtt McpServerPodRole.Arn
+      ServiceAccount: eks-mcp-server
+  McpServerPodIamAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      AccessPolicies:
+        - AccessScope:
+            Type: cluster
+          PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt McpServerPodRole.Arn
+      Type: STANDARD
+  
+  McpServerAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetc
+      SecurityGroups:
+        - !GetAtt Vpc.DefaultSecurityGroup # Ignored
+      Tags: 
+        - Key: elbv2.k8s.aws/cluster
+          Value: !Ref EksCluster
+        - Key: ingress.k8s.aws/resource
+          Value: LoadBalancer
+        - Key: ingress.k8s.aws/stack
+          Value: default/mcp
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for the MCP Server ALB Ingress
+      GroupName: mcp-server-alb-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: !If
+        - SecurityGroupInboundFromAnywhere
+        - - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: 0.0.0.0/0
+        - []
+      Tags:
+        - Key: Name
+          Value: alb-sg
+  
+  Route53Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub "mcp.${McpServerDomain}"
+      Type: A
+      AliasTarget: 
+        DNSName: !GetAtt McpServerAlb.DNSName
+        EvaluateTargetHealth: False
+        HostedZoneId: !GetAtt McpServerAlb.CanonicalHostedZoneID
+      HostedZoneName: !Sub "${McpServerDomain}."
+  AcmCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub mcp.${McpServerDomain}
+      DomainValidationOptions: 
+        - DomainName: !Sub mcp.${McpServerDomain}
+          HostedZoneId: !Ref McpServerRoute53HostedZone
+      KeyAlgorithm: RSA_2048
+      ValidationMethod: DNS
+      # CertificateExport: DISABLED
+      # CertificateTransparencyLoggingPreference: DISABLED
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${VsCodeEc2.PublicIp}:8000
+    Description: Public IP Address of the VS Code
+  McpServerAlb:
+    Value: !Sub https://${McpServerAlb.DNSName}
+    Description: EKS MCP Server ALB DNS Name

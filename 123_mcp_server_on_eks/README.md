@@ -1,1 +1,0 @@
-# AWS MCP Server on EKS
