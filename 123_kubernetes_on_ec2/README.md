@@ -10,3 +10,6 @@
 - 1 Control Plane EC2
 - 1 Node EC2
 - 1 VS Code EC2 (kubectl)
+
+## References
+- [traefik/whoami Golang App](https://github.com/traefik/whoami)

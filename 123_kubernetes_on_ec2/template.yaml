@@ -180,8 +180,8 @@ Resources:
                 response_data["Message"] = "Custom Resource Deleted"
               cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
             except Exception as e:
-              response_data["Reason"] = str(e)
-              cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+              response_data["Message"] = "Error"
+              cfnresponse.send(event, context, cfnresponse.FAILED, response_data, reason=str(e))
   LambdaFunctionIamRole:
     Type: AWS::IAM::Role
     Properties:
