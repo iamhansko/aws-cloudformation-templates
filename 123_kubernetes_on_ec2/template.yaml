@@ -1,0 +1,695 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  KubernetesIngressHostName:
+    Type: String
+    Default: example.com
+    Description: Kubernetes Ingress Host
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping:
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    c:
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, c]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId: !Ref
+            Fn::Sub: PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - VpcInternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, c]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      NatgatewayElasticIp${Az}:
+        Type: AWS::EC2::EIP
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PrivateSubnetRouteTable
+          SubnetId: !Ref
+            Fn::Sub: PrivateSubnet${Az}
+  PrivateSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: private-rt
+  PrivateSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+      RouteTableId: !Ref PrivateSubnetRouteTable
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn:
+      - VpcInternetGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityMode: regional
+      AvailabilityZoneAddresses:
+        - AvailabilityZone: !Sub ${AWS::Region}a
+          AllocationIds:
+            - !GetAtt NatgatewayElasticIpa.AllocationId
+        - AvailabilityZone: !Sub ${AWS::Region}c
+          AllocationIds:
+            - !GetAtt NatgatewayElasticIpc.AllocationId
+      Tags:
+        - Key: Name
+          Value: regional-natgw
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+  EmptyS3Bucket:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+      S3Bucket: !Ref S3Bucket
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.14
+      Handler: index.handler
+      Role: !GetAtt LambdaFunctionIamRole.Arn
+      Timeout: 900
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          import json
+          import time
+          import cfnresponse
+          import boto3
+          s3 = boto3.resource("s3")
+          def handler(event, context):
+            print(f"Event : {json.dumps(event)}")
+            response_data = {}
+            try:
+              request_type = event["RequestType"]
+              s3_bucket = event["ResourceProperties"]["S3Bucket"]
+              
+              if request_type == "Create":
+                response_data["Message"] = "Custom Resource Created"
+              elif request_type == "Update":
+                response_data["Message"] = "Custom Resource Updated"
+              elif request_type == "Delete":
+                bucket = s3.Bucket(s3_bucket)
+                bucket.objects.all().delete()
+                response_data["Message"] = "Custom Resource Deleted"
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+            except Exception as e:
+              response_data["Reason"] = str(e)
+              cfnresponse.send(event, context, cfnresponse.FAILED, response_data)
+  LambdaFunctionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  VsCodeEc2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - KubernetesIngressIpAssociation
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet:
+            - !Ref KubernetesDefaultSecurityGroup
+            - !Ref VsCodeEc2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: vscode
+      IamInstanceProfile: !Ref VsCodeEc2InstanceProfile
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        !Base64
+        Fn::Sub: |
+          #!/bin/bash
+          set -x
+          dnf update -yq
+          dnf install -yq git unzip
+          dnf groupinstall -yq "Development Tools"
+
+          export VSC_VERSION=$(curl -s https://api.github.com/repos/coder/code-server/releases/latest | jq -r '.tag_name | ltrimstr("v")')
+          wget https://github.com/coder/code-server/releases/download/v$VSC_VERSION/code-server-$VSC_VERSION-linux-amd64.tar.gz
+          tar -xzf code-server-$VSC_VERSION-linux-amd64.tar.gz
+          mv code-server-$VSC_VERSION-linux-amd64 /usr/local/lib/code-server
+          ln -s /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+          mkdir -p /home/ec2-user/.config/code-server
+          cat <<EOF > /home/ec2-user/.config/code-server/config.yaml
+          bind-addr: 0.0.0.0:8000
+          auth: none
+          cert: false
+          EOF
+          chown -R ec2-user:ec2-user /home/ec2-user/.config
+          cat <<EOF > /etc/systemd/system/code-server.service
+          [Unit]
+          Description=VS Code Server
+          After=network.target
+          [Service]
+          Type=simple
+          User=ec2-user
+          ExecStart=/usr/local/bin/code-server --config /home/ec2-user/.config/code-server/config.yaml /home/ec2-user
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable code-server
+          systemctl start code-server
+
+          sudo -Eu ec2-user bash << 'EOF'
+          cd /home/ec2-user
+
+          mkdir -p /home/ec2-user/.kube
+          aws s3 cp s3://${S3Bucket}/kubeconfig /home/ec2-user/.kube/config
+          aws s3 cp s3://${S3Bucket}/kubeconfig /root/.kube/config
+
+          mkdir -p /home/ec2-user/bin
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.35.3/2026-04-08/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          mv kubectl /home/ec2-user/bin/kubectl
+          export PATH=/home/ec2-user/bin:$PATH
+          echo "export PATH=/home/ec2-user/bin:$PATH" >> ~/.bashrc
+          echo "alias k=kubectl" >> ~/.bashrc
+          echo "complete -o default -F __start_kubectl k" >> ~/.bashrc
+          echo "source <(kubectl completion bash)" >> ~/.bashrc
+          exec bash
+
+          curl -fsSL -o /home/ec2-user/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 /home/ec2-user/get_helm.sh
+          /home/ec2-user/get_helm.sh
+          rm /home/ec2-user/get_helm.sh
+
+          helm repo add traefik https://traefik.github.io/charts >/dev/null 2>&1 || true
+          helm repo update traefik
+          mkdir -p /home/ec2-user/traefik
+          echo 'deployment:
+            kind: DaemonSet
+          nodeSelector:
+            kubernetes.io/hostname: ${Node.PrivateDnsName}
+            kubernetes.io/os: linux
+          updateStrategy:
+            rollingUpdate:
+              maxUnavailable: 1
+              maxSurge: 0
+          ports:
+            web:
+              port: 8000
+              hostPort: 80
+            websecure:
+              port: 8443
+              hostPort: 443
+          securityContext:
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE]
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          service:
+            spec:
+              type: ClusterIP' > /home/ec2-user/traefik/values.yaml
+          helm upgrade --install traefik traefik/traefik --namespace traefik --create-namespace --values /home/ec2-user/traefik/values.yaml --wait --timeout 300s
+          
+          mkdir -p /home/ec2-user/manifests
+          echo 'apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: whoami
+            labels:
+              app: whoami
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: whoami
+            template:
+              metadata:
+                labels:
+                  app: whoami
+              spec:
+                containers:
+                  - name: whoami
+                    image: traefik/whoami
+                    ports:
+                      - name: http
+                        containerPort: 80
+                    resources:
+                      requests:
+                        cpu: 10m
+                        memory: 32Mi
+                      limits:
+                        cpu: 100m
+                        memory: 64Mi
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: whoami
+          spec:
+            selector:
+              app: whoami
+            ports:
+              - name: http
+                port: 80
+                targetPort: http
+          ---
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: whoami-ingress
+            annotations:
+              traefik.ingress.kubernetes.io/router.entrypoints: web
+          spec:
+            ingressClassName: traefik
+            rules:
+              - host: ${KubernetesIngressHostName}
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: whoami
+                          port:
+                            name: http
+                    - path: /api
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: whoami
+                          port:
+                            name: http' > /home/ec2-user/manifests/web.yaml
+          kubectl apply -f /home/ec2-user/manifests/web.yaml
+          echo '# Kubernetes on EC2
+          
+          curl ${KubernetesIngressHostName}
+          
+          curl ${KubernetesIngressHostName}/api' > README.md
+          EOF
+
+          echo '${KubernetesIngressIp.PublicIp} ${KubernetesIngressHostName}' >> /etc/hosts
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VsCodeEc2 --region ${AWS::Region}
+  VsCodeEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for the VS Code
+      GroupName: vscode-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: !If
+        - SecurityGroupInboundFromAnywhere
+        - - IpProtocol: tcp
+            FromPort: 8000
+            ToPort: 8000
+            CidrIp: 0.0.0.0/0
+        - []
+      Tags:
+        - Key: Name
+          Value: vscode-sg
+  VsCodeEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  VsCodeEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref VsCodeEc2IamRole
+  
+  ControlPlane:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref PrivateSubneta
+          GroupSet:
+            - !Ref KubernetesDefaultSecurityGroup
+      Tags:
+        - Key: Name
+          Value: k8s-controlplane
+      IamInstanceProfile: !Ref ControlPlaneInstanceProfile
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        !Base64
+        Fn::Sub: |
+          #!/bin/bash
+          set -x
+
+          dnf update -yq
+
+          swapoff -a
+          sed -ri '/\sswap\s/s/^/#/' /etc/fstab
+
+          cat <<EOF | tee /etc/modules-load.d/k8s.conf >/dev/null
+          overlay
+          br_netfilter
+          EOF
+          modprobe overlay
+          modprobe br_netfilter
+
+          cat <<EOF | tee /etc/sysctl.d/99-kubernetes-cri.conf >/dev/null
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+          EOF
+          sysctl -p /etc/sysctl.d/99-kubernetes-cri.conf > /dev/null
+
+          dnf install -yq containerd
+          mkdir -p /etc/containerd
+          containerd config default | tee /etc/containerd/config.toml > /dev/null
+          sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+          systemctl enable --now containerd
+
+          K8S_LATEST_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+          K8S_MINOR_VERSION=$(echo "$K8S_LATEST_VERSION" | grep -oE '^v[0-9]+\.[0-9]+')
+          echo "$K8S_LATEST_VERSION - $K8S_MINOR_VERSION"
+
+          cat << EOF | tee /etc/yum.repos.d/kubernetes.repo > /dev/null
+          [kubernetes]
+          name=Kubernetes
+          baseurl=https://pkgs.k8s.io/core:/stable:/$K8S_MINOR_VERSION/rpm/
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://pkgs.k8s.io/core:/stable:/$K8S_MINOR_VERSION/rpm/repodata/repomd.xml.key
+          exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+          EOF
+
+          dnf install -yq kubelet kubeadm kubectl --disableexcludes=kubernetes
+          systemctl enable --now kubelet
+
+          IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+
+          POD_NETWORK_CIDR="192.168.0.0/16" # Calico Default Pod CIDR
+
+          kubeadm init \
+          --pod-network-cidr="$POD_NETWORK_CIDR" \
+          --apiserver-advertise-address="$PRIVATE_IP" \
+          --node-name="$(hostname -f)"
+
+          mkdir -p /root/.kube
+          cp -f /etc/kubernetes/admin.conf /root/.kube/config
+          chown root:root /root/.kube/config
+
+          mkdir -p /home/ec2-user/.kube
+          cp -f /etc/kubernetes/admin.conf /home/ec2-user/.kube/config
+          chown ec2-user:ec2-user /home/ec2-user/.kube/config
+
+          aws s3 cp /root/.kube/config s3://${S3Bucket}/kubeconfig
+
+          kubeadm token create --print-join-command > /home/ec2-user/join.sh
+          
+          aws s3 cp /home/ec2-user/join.sh s3://${S3Bucket}/join.sh
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ControlPlane --region ${AWS::Region}
+
+          export KUBECONFIG=/root/.kube/config
+
+          CALICO_VERSION=$(curl -s https://api.github.com/repos/projectcalico/calico/releases/latest | grep '"tag_name"' | head -n1 | cut -d '"' -f4)
+          kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/tigera-operator.yaml --validate=false
+          kubectl -n tigera-operator wait --for=condition=Available deployment/tigera-operator --timeout=180s
+          curl -sL -o /tmp/custom-resources.yaml https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/custom-resources.yaml
+          sed -i "s#cidr: 192.168.0.0/16#cidr: $POD_NETWORK_CIDR#" /tmp/custom-resources.yaml
+          sleep 30
+          kubectl create -f /tmp/custom-resources.yaml
+          kubectl wait --for=condition=Established crd/installations.operator.tigera.io --timeout=180s
+  ControlPlaneIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # - arn:aws:iam::aws:policy/AdministratorAccess
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+  ControlPlaneInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ControlPlaneIamRole
+  
+  Node:
+    Type: AWS::EC2::Instance
+    DependsOn: 
+      - ControlPlane
+      - KubernetesDefaultSecurityGroupIngress
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT5M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnetc # PrivateSubnetc
+          GroupSet:
+            - !Ref KubernetesDefaultSecurityGroup
+            - !Ref KubernetesIngressSecurityGroup
+      Tags:
+        - Key: Name
+          Value: k8s-node
+      IamInstanceProfile: !Ref NodeInstanceProfile
+      UserData:
+        # sudo tail -f /var/log/cloud-init-output.log
+        !Base64
+        Fn::Sub: |
+          #!/bin/bash
+          set -x
+
+          dnf update -yq
+
+          swapoff -a
+          sed -ri '/\sswap\s/s/^/#/' /etc/fstab
+
+          cat <<EOF | tee /etc/modules-load.d/k8s.conf >/dev/null
+          overlay
+          br_netfilter
+          EOF
+          modprobe overlay
+          modprobe br_netfilter
+
+          cat <<EOF | tee /etc/sysctl.d/99-kubernetes-cri.conf >/dev/null
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+          EOF
+          sysctl -p /etc/sysctl.d/99-kubernetes-cri.conf > /dev/null
+
+          dnf install -yq containerd
+          mkdir -p /etc/containerd
+          containerd config default | tee /etc/containerd/config.toml > /dev/null
+          sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+          systemctl enable --now containerd
+
+          K8S_LATEST_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+          K8S_MINOR_VERSION=$(echo "$K8S_LATEST_VERSION" | grep -oE '^v[0-9]+\.[0-9]+')
+          echo "$K8S_LATEST_VERSION - $K8S_MINOR_VERSION"
+
+          cat << EOF | tee /etc/yum.repos.d/kubernetes.repo > /dev/null
+          [kubernetes]
+          name=Kubernetes
+          baseurl=https://pkgs.k8s.io/core:/stable:/$K8S_MINOR_VERSION/rpm/
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://pkgs.k8s.io/core:/stable:/$K8S_MINOR_VERSION/rpm/repodata/repomd.xml.key
+          exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+          EOF
+
+          dnf install -yq kubelet kubeadm kubectl --disableexcludes=kubernetes
+          systemctl enable --now kubelet
+          
+          aws s3 cp s3://${S3Bucket}/join.sh /home/ec2-user/join.sh
+          chmod +x /home/ec2-user/join.sh
+          /home/ec2-user/join.sh
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource Node --region ${AWS::Region}
+  NodeIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # - arn:aws:iam::aws:policy/AdministratorAccess
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+  NodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref NodeIamRole
+  
+  KubernetesDefaultSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Default Security Group for the Kubernetes Cluster
+      GroupName: k8s-default-sg
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: k8s-default-sg
+  KubernetesDefaultSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn:
+      - NatGateway
+    Properties:
+      GroupId: !GetAtt KubernetesDefaultSecurityGroup.GroupId
+      IpProtocol: -1
+      SourceSecurityGroupId: !GetAtt KubernetesDefaultSecurityGroup.GroupId
+  
+  KubernetesIngressSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for the Kubernetes Ingress
+      GroupName: k8s-ingress-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: !If
+        - SecurityGroupInboundFromAnywhere
+        - - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+        - []
+      Tags:
+        - Key: Name
+          Value: k8s-ingress-sg
+  KubernetesIngressIp:
+    Type: AWS::EC2::EIP
+  KubernetesIngressIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt KubernetesIngressIp.AllocationId
+      InstanceId: !Ref Node
+
+Outputs:
+  VsCode:
+    Value: !Sub http://${VsCodeEc2.PublicIp}:8000
+    Description: Public IP Address of the VS Code

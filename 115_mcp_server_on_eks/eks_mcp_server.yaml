@@ -712,7 +712,7 @@ Resources:
         - []
       Tags:
         - Key: Name
-          Value: mcp-server-bastion-sg
+          Value: vscode-sg
   VsCodeEc2IamRole:
     Type: AWS::IAM::Role
     Properties:
