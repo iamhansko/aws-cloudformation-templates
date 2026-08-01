@@ -332,7 +332,6 @@ Resources:
   GomokuGameLiftFleetRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub GameLiftFleetRole-${AWS::StackName}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -342,22 +341,8 @@ Resources:
                 - gamelift.amazonaws.com
             Action:
               - sts:AssumeRole
-          # - Effect: Allow
-          #   Principal:
-          #     AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
-          #   Action:
-          #     - sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSQSFullAccess
-      # Policies:
-      #   - PolicyName: SelfAssumeRolePolicy
-      #     PolicyDocument:
-      #       Version: '2012-10-17'
-      #       Statement:
-      #         - Effect: Allow
-      #           Action:
-      #             - sts:AssumeRole
-      #           Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/GameLiftFleetRole-${AWS::StackName}
   
   GomokuGameMatchEvent:
     Type: AWS::IAM::Role
@@ -1105,12 +1090,36 @@ Resources:
           PLAYER_PASSWD = simplepw00
           '@ | Out-File -FilePath $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\Client_player2\config.ini -Encoding ascii
 
-              $DesktopPath = "C:\Users\${Username}.$env:COMPUTERNAME\Desktop"
-              New-Item -ItemType Directory -Path $DesktopPath -Force
-              Compress-Archive -Path $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\Client_player1, $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\Client_player2 -DestinationPath "$DesktopPath\client.zip" -Force
-              aws s3 cp "$DesktopPath\client.zip" s3://${GameSourceS3Bucket}/client.zip
-              tar -xf "$DesktopPath\client.zip" -C $DesktopPath
-              Remove-Item "$DesktopPath\client.zip"
+              Compress-Archive -Path $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\Client_player1, $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\Client_player2 -DestinationPath "$WorkshopDir\aws-gamelift-sample\client.zip" -Force
+              aws s3 cp "$WorkshopDir\aws-gamelift-sample\client.zip" s3://${GameSourceS3Bucket}/client.zip
+
+              Write-Log "Creating Workshop User Logon Script"
+              $LogonScript = '# Workshop User First Logon Setup' + "`n"
+              $LogonScript += '$LogFile = "C:\ProgramData\GameliftWorkshop\logon.log"' + "`n"
+              $LogonScript += 'function Write-LogonLog { param([string]$Message); Add-Content -Path $LogFile -Value "[$((Get-Date))] $Message" }' + "`n"
+              $LogonScript += '$DesktopPath = [Environment]::GetFolderPath("Desktop")' + "`n"
+              $LogonScript += 'Write-LogonLog "Desktop path: $DesktopPath"' + "`n"
+              $LogonScript += '$GameClientPath = "C:\ProgramData\GameliftWorkshop\aws-gamelift-sample\bin\FlexMatch"' + "`n"
+              $LogonScript += '$WshShell = New-Object -comObject WScript.Shell' + "`n"
+              $LogonScript += 'if (Test-Path "C:\ProgramData\GameliftWorkshop\aws-gamelift-sample\bin\FlexMatch\Client_player1") {' + "`n"
+              $LogonScript += '    $GameClient1Shortcut = $WshShell.CreateShortcut("$DesktopPath\Game Client 1.lnk")' + "`n"
+              $LogonScript += '    $GameClient1Shortcut.TargetPath = "$GameClientPath\Client_player1"' + "`n"
+              $LogonScript += '    $GameClient1Shortcut.Save()' + "`n"
+              $LogonScript += '    Write-LogonLog "Game Client 1 Shortcut Created"' + "`n"
+              $LogonScript += '}' + "`n"
+              $LogonScript += 'if (Test-Path "C:\ProgramData\GameliftWorkshop\aws-gamelift-sample\bin\FlexMatch\Client_player2") {' + "`n"
+              $LogonScript += '    $GameClient2Shortcut = $WshShell.CreateShortcut("$DesktopPath\Game Client 2.lnk")' + "`n"
+              $LogonScript += '    $GameClient2Shortcut.TargetPath = "$GameClientPath\Client_player2"' + "`n"
+              $LogonScript += '    $GameClient2Shortcut.Save()' + "`n"
+              $LogonScript += '    Write-LogonLog "Game Client 2 Shortcut Created"' + "`n"
+              $LogonScript += '}' + "`n"
+              $LogonScript += 'Write-LogonLog "Workshop User Setup Completed"' + "`n"
+              $LogonScript += 'Remove-Item $MyInvocation.MyCommand.Path -Force' + "`n"
+
+              $LogonScriptPath = "C:\ProgramData\GameliftWorkshop\${Username}-setup.ps1"
+              Set-Content -Path $LogonScriptPath -Value $LogonScript
+              $LogonKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+              Set-ItemProperty -Path $LogonKey -Name "WorkshopSetup" -Value "powershell.exe -ExecutionPolicy Bypass -File `"$LogonScriptPath`"" -Force
           } catch {
               Write-Log "Setup Failed: $($_.Exception.Message)"
               cfn-signal --success false --stack ${AWS::StackName} --resource WindowsEc2 --region ${AWS::Region}
@@ -1255,12 +1264,16 @@ Outputs:
   02GomokuWeb:
     Value: !GetAtt WebS3Bucket.WebsiteURL
     Description: Gomoku Leaderboard URL
-  03GameClientRdpUrl:
-    Value: !Sub ${WindowsEc2.PublicIp}:3389
-  04GameClientRdpUsername:
-    Value: !Ref Username
-  05GameClientRdpPassword:
-    Value: !GetAtt SecretPlaintext.password
-  06GameServerAccess:
+  03GameClientAccess:
+    Value: !Sub |
+      cmdkey /generic:TERMSRV/${WindowsEc2.PublicIp} /user:${Username} /pass:"${SecretPlaintext.password}" && mstsc /v:${WindowsEc2.PublicIp}:3389
+  04GameServerAccess:
     Value: !Sub |
       GAME_SERVER_INSTANCE=$(aws gamelift describe-instances --fleet-id ${GameLiftFleet} --output text --query 'Instances[0].InstanceId'); aws gamelift get-instance-access --fleet-id ${GameLiftFleet} --instance-id $GAME_SERVER_INSTANCE
+    Description: https://docs.aws.amazon.com/gameliftservers/latest/developerguide/fleets-remote-access.html#fleets-remote-access-connect
+  05ElasticacheRedisConnect:
+    Value: !Sub |
+      redis6-cli -h ${GomokuRanking.RedisEndpoint.Address} -p 6379 ZRANGE Rating 0 -1 WITHSCORES
+    # ZRANGE Rating 0 -1 WITHSCORES 
+    # KEYS *
+    Description: Use CloudShell in the VPC
