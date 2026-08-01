@@ -1,0 +1,1266 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  Username:
+    Type: String
+    Default: gamelift
+  WindowsServerAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-windows-latest/Windows_Server-2025-Korean-Full-Base
+  InboundFromAnywhere:
+    Type: String
+    Default: "True"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+
+Resources:  
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, c]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, c]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+  
+  GameSourceS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  WebS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+  WebS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: WebS3BucketPolicy
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub ${WebS3Bucket.Arn}/*
+      Bucket: !Ref WebS3Bucket
+
+  GomokuPlayerInfo:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: GomokuPlayerInfo
+      AttributeDefinitions:
+        - AttributeName: PlayerName
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PlayerName
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+  
+  GomokuRanking:
+    Type: AWS::ElastiCache::CacheCluster
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      ClusterName: GomokuRanking
+      Port: 6379
+      CacheNodeType: cache.r7g.large
+      Engine: redis
+      EngineVersion: 7.1
+      NumCacheNodes: 1
+      CacheSubnetGroupName: !Ref GomokuRankingSubnetGroup
+      VpcSecurityGroupIds:
+        - !GetAtt GomokuDefault.GroupId
+  GomokuRankingSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Subnet Group
+      SubnetIds: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetc
+        - !Ref PrivateSubneta
+        - !Ref PrivateSubnetc
+  
+  GomokuDefault:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: GomokuDefault
+      GroupDescription: Security Group for Gomoku Resources
+      VpcId: !Ref Vpc
+  GomokuDefaultIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt GomokuDefault.GroupId
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt GomokuDefault.GroupId
+  
+  GameResultQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: game-result-queue
+      VisibilityTimeout: 60
+  
+  GameLiftPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: GameLiftPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - gamelift:*
+            Resource: '*'
+      Roles:
+        - !Ref GomokuGameSqsProcess
+        - !Ref GomokuGameMatchRequest
+        - !Ref GomokuGameMatchStatus
+  
+  GomokuGameSqsProcess:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  
+  GomokuGameRankUpdate:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonVPCFullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  GomokuGameRankReader:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonVPCFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  GomokuGameMatchStatus:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+
+  GomokuGameMatchRequest:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  GomokuGameLiftFleetRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub GameLiftFleetRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - gamelift.amazonaws.com
+            Action:
+              - sts:AssumeRole
+          # - Effect: Allow
+          #   Principal:
+          #     AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+          #   Action:
+          #     - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+      # Policies:
+      #   - PolicyName: SelfAssumeRolePolicy
+      #     PolicyDocument:
+      #       Version: '2012-10-17'
+      #       Statement:
+      #         - Effect: Allow
+      #           Action:
+      #             - sts:AssumeRole
+      #           Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/GameLiftFleetRole-${AWS::StackName}
+  
+  GomokuGameMatchEvent:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  GameSqsProcess:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - WindowsEc2
+    Properties:
+      FunctionName: game-sqs-process
+      Runtime: python3.13
+      Handler: GameResultProcessing.lambda_handler
+      Role: !GetAtt GomokuGameSqsProcess.Arn
+      Code:
+        S3Bucket: !Ref GameSourceS3Bucket
+        S3Key: Lambda/code.zip
+      Timeout: 60
+  GameSqsProcessSqsTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt GameResultQueue.Arn
+      FunctionName: !GetAtt GameSqsProcess.Arn
+
+  GameRankUpdate:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - WindowsEc2
+    Properties:
+      FunctionName: game-rank-update
+      Runtime: python3.13
+      Handler: Scoring.handler
+      Role: !GetAtt GomokuGameRankUpdate.Arn
+      Code:
+        S3Bucket: !Ref GameSourceS3Bucket
+        S3Key: Lambda/code.zip
+      Timeout: 60
+      Environment:
+        Variables: 
+          REDIS: !GetAtt GomokuRanking.RedisEndpoint.Address
+      VpcConfig:
+        SecurityGroupIds: 
+          - !GetAtt GomokuDefault.GroupId
+        SubnetIds: 
+          - !Ref PublicSubneta
+          - !Ref PublicSubnetc
+          - !Ref PrivateSubneta
+          - !Ref PrivateSubnetc
+  GameRankUpdateDynamoDbTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt GomokuPlayerInfo.StreamArn
+      FunctionName: !GetAtt GameRankUpdate.Arn
+      StartingPosition: TRIM_HORIZON
+
+  GameRankReader:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - WindowsEc2
+    Properties:
+      FunctionName: game-rank-reader
+      Runtime: python3.13
+      Handler: GetRank.handler
+      Role: !GetAtt GomokuGameRankReader.Arn
+      Code:
+        S3Bucket: !Ref GameSourceS3Bucket
+        S3Key: Lambda/code.zip
+      Timeout: 60
+      Environment:
+        Variables: 
+          REDIS: !GetAtt GomokuRanking.RedisEndpoint.Address
+      VpcConfig:
+        SecurityGroupIds: 
+          - !GetAtt GomokuDefault.GroupId
+        SubnetIds: 
+          - !Ref PublicSubneta
+          - !Ref PublicSubnetc
+          - !Ref PrivateSubneta
+          - !Ref PrivateSubnetc
+  GameRankReaderPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GameRankReader
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${GomokuAPI}/*/GET/ranking
+
+  GameMatchRequest:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - WindowsEc2
+    Properties:
+      FunctionName: game-match-request
+      Runtime: python3.13
+      Handler: MatchRequest.lambda_handler
+      Role: !GetAtt GomokuGameMatchRequest.Arn
+      Code:
+        S3Bucket: !Ref GameSourceS3Bucket
+        S3Key: Lambda/code.zip
+      Timeout: 60
+  GameMatchRequestPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GameMatchRequest
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${GomokuAPI}/*/POST/matchrequest
+
+  GameMatchStatus:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - WindowsEc2
+    Properties:
+      FunctionName: game-match-status
+      Runtime: python3.13
+      Handler: MatchStatus.lambda_handler
+      Role: !GetAtt GomokuGameMatchStatus.Arn
+      Code:
+        S3Bucket: !Ref GameSourceS3Bucket
+        S3Key: Lambda/code.zip
+      Timeout: 60
+  GameMatchStatusPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GameMatchStatus
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${GomokuAPI}/*/POST/matchstatus
+
+  GameMatchEvent:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - WindowsEc2
+    Properties:
+      FunctionName: game-match-event
+      Runtime: python3.13
+      Handler: MatchEvent.lambda_handler
+      Role: !GetAtt GomokuGameMatchEvent.Arn
+      Code:
+        S3Bucket: !Ref GameSourceS3Bucket
+        S3Key: Lambda/code.zip
+      Timeout: 60
+  GameMatchEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt GameMatchEvent.Arn
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SnsTopic
+  SnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: gomoku-match-topic
+  SnsTopicAccessPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Id: SnsTopicPolicy
+        Statement: 
+          - Sid: AllowSnsActions
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - SNS:GetTopicAttributes
+              - SNS:SetTopicAttributes
+              - SNS:AddPermission
+              - SNS:RemovePermission
+              - SNS:DeleteTopic
+              - SNS:Subscribe
+              - SNS:ListSubscriptionsByTopic
+              - SNS:Publish
+            Resource: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SnsTopic.TopicName}
+            Condition:
+              StringEquals:
+                AWS:SourceOwner: !Ref AWS::AccountId
+          - Sid: AllowSnsPublish
+            Effect: Allow
+            Principal:
+              Service: gamelift.amazonaws.com
+            Action: SNS:Publish
+            Resource: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SnsTopic.TopicName}
+      Topics: 
+        - !Ref SnsTopic
+  SnsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      Endpoint: !GetAtt GameMatchEvent.Arn
+      TopicArn: !Ref SnsTopic
+
+  GomokuAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: GomokuAPI
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+  GomokuAPIRankingResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref GomokuAPI
+      ParentId: !GetAtt GomokuAPI.RootResourceId
+      PathPart: ranking
+  GomokuAPIRankingGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GameRankReader.Arn}/invocations
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+            ResponseTemplates:
+              application/json: ''
+      MethodResponses:
+        - ResponseModels: 
+            application/json: Empty
+          ResponseParameters: 
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: 200
+      ResourceId: !Ref GomokuAPIRankingResource
+      RestApiId: !Ref GomokuAPI
+  GomokuAPIRankingOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        IntegrationHttpMethod: OPTIONS
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: '''Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'''
+              method.response.header.Access-Control-Allow-Methods: '''GET,OPTIONS'''
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+      MethodResponses:
+        - ResponseModels: 
+            application/json: Empty
+          ResponseParameters: 
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: 200
+      ResourceId: !Ref GomokuAPIRankingResource
+      RestApiId: !Ref GomokuAPI
+  GomokuAPIMatchRequestResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref GomokuAPI
+      ParentId: !GetAtt GomokuAPI.RootResourceId
+      PathPart: matchrequest
+  GomokuAPIMatchRequestPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GameMatchRequest.Arn}/invocations
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+            ResponseTemplates:
+              application/json: ''
+      MethodResponses:
+        - ResponseModels: 
+            application/json: Empty
+          ResponseParameters: 
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: 200
+      ResourceId: !Ref GomokuAPIMatchRequestResource
+      RestApiId: !Ref GomokuAPI
+  GomokuAPIMatchRequestOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        IntegrationHttpMethod: OPTIONS
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: '''Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'''
+              method.response.header.Access-Control-Allow-Methods: '''POST,OPTIONS'''
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+      MethodResponses:
+        - ResponseModels: 
+            application/json: Empty
+          ResponseParameters: 
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: 200
+      ResourceId: !Ref GomokuAPIMatchRequestResource
+      RestApiId: !Ref GomokuAPI
+  GomokuAPIMatchStatusResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref GomokuAPI
+      ParentId: !GetAtt GomokuAPI.RootResourceId
+      PathPart: matchstatus
+  GomokuAPIMatchStatusPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GameMatchStatus.Arn}/invocations
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+            ResponseTemplates:
+              application/json: ''
+      MethodResponses:
+        - ResponseModels: 
+            application/json: Empty
+          ResponseParameters: 
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: 200
+      ResourceId: !Ref GomokuAPIMatchStatusResource
+      RestApiId: !Ref GomokuAPI
+  GomokuAPIMatchStatusOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        IntegrationHttpMethod: OPTIONS
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: '''Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'''
+              method.response.header.Access-Control-Allow-Methods: '''POST,OPTIONS'''
+              method.response.header.Access-Control-Allow-Origin: '''*'''
+      MethodResponses:
+        - ResponseModels: 
+            application/json: Empty
+          ResponseParameters: 
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: 200
+      ResourceId: !Ref GomokuAPIMatchStatusResource
+      RestApiId: !Ref GomokuAPI
+  GomokuAPIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - GomokuAPIRankingGet
+      - GomokuAPIRankingOptions
+      - GomokuAPIMatchRequestPost
+      - GomokuAPIMatchRequestOptions
+      - GomokuAPIMatchStatusPost
+      - GomokuAPIMatchStatusOptions
+    Properties:
+      RestApiId: !Ref GomokuAPI
+      StageName: prod
+
+  GameLiftBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+                - gamelift.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GameLiftBuildPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:*Object*
+                Resource:
+                  - !Sub ${GameSourceS3Bucket.Arn}/*
+  GameLiftBuild:
+    Type: AWS::GameLift::Build
+    DependsOn:
+      - WindowsEc2
+    Properties:
+      Name: GomokuServer-Build-1
+      OperatingSystem: WINDOWS_2016
+      StorageLocation:
+        Bucket: !Ref GameSourceS3Bucket
+        Key: server.zip    
+        RoleArn: !GetAtt GameLiftBuildRole.Arn
+  GameLiftFleet:
+    Type: AWS::GameLift::Fleet
+    Properties:
+      Name: GomokuGameServerFleet-1
+      BuildId: !Ref GameLiftBuild
+      ComputeType: EC2
+      EC2InboundPermissions: 
+        - FromPort: 49152
+          ToPort: 60000
+          IpRange: 0.0.0.0/0
+          Protocol: TCP
+      EC2InstanceType: c5.large
+      FleetType: SPOT
+      InstanceRoleARN: !GetAtt GomokuGameLiftFleetRole.Arn
+      Locations: 
+        - Location: !Ref AWS::Region
+          LocationCapacity:
+            MinSize: 1
+            DesiredEC2Instances: 1
+            MaxSize: 1
+      RuntimeConfiguration: 
+        GameSessionActivationTimeoutSeconds: 600
+        MaxConcurrentGameSessionActivations: 2147483647
+        ServerProcesses: 
+          - ConcurrentExecutions: 50
+            LaunchPath: C:\game\Binaries\Win64\GomokuServer.exe
+  GameLiftAlias:
+    Type: AWS::GameLift::Alias
+    Properties:
+      Name: GomokuAlias
+      RoutingStrategy:
+        Type: SIMPLE
+        FleetId: !Ref GameLiftFleet
+  GameLiftQueue:
+    Type: AWS::GameLift::GameSessionQueue
+    Properties:
+      Name: gomoku-queue
+      TimeoutInSeconds: 600
+      Destinations: 
+        - DestinationArn: !GetAtt GameLiftAlias.AliasArn
+  GameLiftMatchmakingRuleSet:
+    Type: AWS::GameLift::MatchmakingRuleSet
+    Properties:
+      Name: gomoku-matchmaking-rule
+      RuleSetBody: !Sub |
+        {
+            "ruleLanguageVersion" : "1.0",
+            "playerAttributes" :
+            [
+                {
+                    "name" : "score",
+                    "type" : "number",
+                    "default" : 1000
+                }
+            ],
+            "teams" :
+            [
+                {
+                    "name" : "blue",
+                    "maxPlayers" : 1,
+                    "minPlayers" : 1
+                },
+                {
+                    "name" : "red",
+                    "maxPlayers" : 1,
+                    "minPlayers" : 1
+                }
+            ],
+            "rules" :
+            [
+                {   "name": "EqualTeamSizes",
+                    "type": "comparison",
+                    "measurements": [ "count(teams[red].players)" ],
+                    "referenceValue": "count(teams[blue].players)",
+                    "operation": "="
+                },
+                {
+                    "name" : "FairTeamSkill",
+                    "type" : "distance",
+                    "measurements" : [ "avg(teams[*].players.attributes[score])" ],
+                    "referenceValue" : "avg(flatten(teams[*].players.attributes[score]))",
+                    "maxDistance" : 300
+                }
+            ],
+            "expansions" :
+            [
+                {
+                    "target" : "rules[FairTeamSkill].maxDistance",
+                    "steps" :
+                    [
+                        {
+                            "waitTimeSeconds" : 10,
+                            "value" : 500
+                        },
+                        {
+                            "waitTimeSeconds" : 20,
+                            "value" : 800
+                        },
+                        {
+                            "waitTimeSeconds" : 30,
+                            "value" : 1000
+                        }
+                    ]
+                }
+            ]
+        }
+  GameLiftMatchmakingConfiguration:
+    Type: AWS::GameLift::MatchmakingConfiguration
+    Properties:
+      Name: GomokuMatchConfig
+      RequestTimeoutSeconds: 60
+      AcceptanceRequired: False
+      GameSessionQueueArns: 
+        - !GetAtt GameLiftQueue.Arn
+      RuleSetName: !GetAtt GameLiftMatchmakingRuleSet.Name
+      NotificationTarget: !GetAtt SnsTopic.TopicArn
+  
+  WindowsEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT30M
+    Properties:
+      ImageId: !Ref WindowsServerAmiId
+      InstanceType: m5.2xlarge
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubneta
+          GroupSet: 
+            - !Ref WindowsEc2SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 100
+            DeleteOnTermination: true
+            Encrypted: false
+      Tags: 
+        - Key: Name
+          Value: windows
+      IamInstanceProfile: !Ref WindowsEc2InstanceProfile
+      UserData: 
+        # C:\Windows\System32\config\systemprofile\AppData\Local\Temp
+        Fn::Base64: !Sub |
+          <powershell>
+          $ErrorActionPreference = "Continue"
+          $ProgressPreference = "SilentlyContinue"
+          $LogFile = "C:\ProgramData\GameliftWorkshop\setup.log"
+          New-Item -ItemType Directory -Path "C:\ProgramData\GameliftWorkshop" -Force
+
+          function Write-Log {
+              param([string]$Message)
+              $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+              $LogMessage = "[$Timestamp] $Message"
+              Write-Host $LogMessage
+              Add-Content -Path $LogFile -Value $LogMessage -ErrorAction SilentlyContinue
+          }
+
+          Write-Log "Starting Gamelift Workshop Windows Setup"
+
+          try {
+              # Install AWS PowerShell Module
+              Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers
+              Install-Module -Name AWS.Tools.SecretsManager -Force -AllowClobber -Scope AllUsers
+              Import-Module AWS.Tools.SecretsManager -Force
+              Set-DefaultAWSRegion -Region ${AWS::Region}
+
+              $SecretValue = Get-SECSecretValue -SecretId ${WindowsUserPassword.Id} -Region ${AWS::Region}
+              $WorkshopPassword = ($SecretValue.SecretString | ConvertFrom-Json).password
+              Write-Log "Password Retrieved"
+
+              # Restrict Windows dynamic (ephemeral) port range to match the GameLift Fleet's
+              # EC2InboundPermissions (49152-60000). GameLift Windows fleets only support port
+              # ranges up to 60000, but Windows Server's default ephemeral range extends to 65535.
+              # Without this, GameLift server processes that bind to a port above 60000 will fail
+              # ProcessReady() and exit (SERVER_PROCESS_CRASHED).
+              Write-Log "Restricting dynamic port range to 49152-60000"
+              netsh int ipv4 set dynamicport tcp start=49152 num=10849
+              netsh int ipv6 set dynamicport tcp start=49152 num=10849
+
+              # Enable RDP
+              Write-Log "Configuring RDP"
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+              Set-Service -Name "TermService" -StartupType Automatic
+              Start-Service -Name "TermService" -ErrorAction SilentlyContinue
+              netsh advfirewall firewall set rule group="Remote Desktop" new enable=yes
+
+              # Create Workshop User
+              Write-Log "Creating Workshop User"
+              Remove-LocalUser -Name "${Username}" -ErrorAction SilentlyContinue
+              $Password = ConvertTo-SecureString $WorkshopPassword -AsPlainText -Force
+              $User = New-LocalUser -Name "${Username}" -Password $Password -FullName "Workshop User" -PasswordNeverExpires -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member "${Username}" -ErrorAction SilentlyContinue
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "${Username}" -ErrorAction SilentlyContinue
+
+              # Setup Directories - Enhanced domain handling
+              Write-Log "Finding Workshop User Profile"
+              $UserProfiles = Get-WmiObject -Class Win32_UserProfile | Where-Object {
+                  $_.LocalPath -like "*${Username}*" -and
+                  $_.LocalPath -notlike "*.bak" -and
+                  $_.LocalPath -notlike "*temp*"
+              }
+
+              if ($UserProfiles) {
+                  # Find workshop.ComputerName Pattern Specifically
+                  $ComputerName = $env:COMPUTERNAME
+                  $PreferredPattern = "${Username}.$ComputerName"
+
+                  $PreferredProfile = $UserProfiles | Where-Object {$_.LocalPath -like "*$PreferredPattern*" -and $_.LocalPath -notlike "*.000" -and $_.LocalPath -notlike "*.001"}
+
+                  if ($PreferredProfile) {
+                      $UserProfilePath = $PreferredProfile[0].LocalPath
+                      Write-Log "Selected Preferred Profile: $UserProfilePath"
+                  } else {
+                      # Fallback to the shortest Path
+                      $UserProfilePath = ($UserProfiles.LocalPath | Sort-Object Length)[0]
+                      Write-Log "Selected Fallback Profile: $UserProfilePath"
+                  }
+
+                  # Log all found Profiles for Debugging
+                  foreach ($profile in $UserProfiles) {
+                      Write-Log "Found ${Username} Profile: $($profile.LocalPath)"
+                  }
+              } else {
+                  # Deterministically Construct workshop.ComputerName Path
+                  $ComputerName = $env:COMPUTERNAME
+                  $UserProfilePath = "C:\Users\${Username}.$ComputerName"
+                  Write-Log "Using Constructed Path: $UserProfilePath"
+              }
+
+              $WorkshopDir = "C:\ProgramData\GameliftWorkshop"
+              $TempDir = "$WorkshopDir\temp"
+              New-Item -ItemType Directory -Path $TempDir -Force
+
+              # Install Chocolatey
+              Write-Log "Installing Chocolatey"
+              Set-ExecutionPolicy Bypass -Scope Process -Force
+              [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+              iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+              Write-Log "Installing Git"
+              choco install git -y
+
+              Write-Log "Installing AWS CLI"
+              choco install awscli -y
+
+              Write-Log "Installing Python 3.14"
+              choco install python314 -y
+
+              # Refresh Environment Variables after Installations
+              $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+              try {
+                  $awsVersion = aws --version
+                  Write-Log "AWS CLI Installed: $awsVersion"
+              } catch {
+                  Write-Log "AWS CLI Verification Failed"
+              }
+
+              # Set Permissions
+              icacls $WorkshopDir /grant "${Username}:F" /T /Q
+              if (Test-Path $UserProfilePath) {
+                  icacls "$UserProfilePath" /grant "${Username}:F" /T /Q
+              }
+
+              $maxRetries = 10
+              $retryCount = 0
+              do {
+                  Start-Sleep -Seconds 3
+                  $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+                  $gitAvailable = Get-Command git -ErrorAction SilentlyContinue
+                  $retryCount++
+              } while (-not $gitAvailable -and $retryCount -lt $maxRetries)
+
+              if ($gitAvailable) {
+                  $gitVersion = git --version
+                  Write-Log "Git installed: $gitVersion"
+                  Set-Location $WorkshopDir
+                  git clone https://github.com/iamhansko/aws-gamelift-sample.git
+              } else {
+                  Write-Log "Git Unavailable"
+              }
+
+              Set-Location $WorkshopDir\aws-gamelift-sample
+              @'
+          [config]
+          # GameResult SQS
+          SQS_REGION = ${AWS::Region}
+          SQS_ENDPOINT = ${GameResultQueue.QueueUrl}
+          ROLE_ARN = ${GomokuGameLiftFleetRole.Arn}
+          '@ | Out-File -FilePath $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\GomokuServer\Binaries\Win64\config.ini -Encoding ascii
+              Set-Location $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\GomokuServer
+              Compress-Archive -Path .\* -DestinationPath .\server.zip -Force
+              aws s3 cp .\server.zip s3://${GameSourceS3Bucket}/server.zip
+              Set-Location $WorkshopDir\aws-gamelift-sample
+              aws s3 cp --recursive $WorkshopDir\aws-gamelift-sample s3://${GameSourceS3Bucket}
+
+              (Get-Content $WorkshopDir\aws-gamelift-sample\web\main.js) -replace 'niop6gw2v0', '${GomokuAPI}' | Set-Content $WorkshopDir\aws-gamelift-sample\web\main.js
+              (Get-Content $WorkshopDir\aws-gamelift-sample\web\main.js) -replace 'us-east-1', '${AWS::Region}' | Set-Content $WorkshopDir\aws-gamelift-sample\web\main.js
+              aws s3 cp --recursive $WorkshopDir\aws-gamelift-sample\web\ s3://${WebS3Bucket}
+
+              Set-Location $WorkshopDir\aws-gamelift-sample\bin\FlexMatch
+
+              @'
+          [config]
+          MATCH_SERVER_API = https://${GomokuAPI}.execute-api.${AWS::Region}.amazonaws.com/prod
+          PLAYER_NAME = Amazonian
+          PLAYER_PASSWD = simplepw00
+          '@ | Out-File -FilePath $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\Client_player1\config.ini -Encoding ascii
+
+              @'
+          [config]
+          MATCH_SERVER_API = https://${GomokuAPI}.execute-api.${AWS::Region}.amazonaws.com/prod
+          PLAYER_NAME = Ahro
+          PLAYER_PASSWD = simplepw00
+          '@ | Out-File -FilePath $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\Client_player2\config.ini -Encoding ascii
+
+              $DesktopPath = "C:\Users\${Username}.$env:COMPUTERNAME\Desktop"
+              New-Item -ItemType Directory -Path $DesktopPath -Force
+              Compress-Archive -Path $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\Client_player1, $WorkshopDir\aws-gamelift-sample\bin\FlexMatch\Client_player2 -DestinationPath "$DesktopPath\client.zip" -Force
+              aws s3 cp "$DesktopPath\client.zip" s3://${GameSourceS3Bucket}/client.zip
+              tar -xf "$DesktopPath\client.zip" -C $DesktopPath
+              Remove-Item "$DesktopPath\client.zip"
+          } catch {
+              Write-Log "Setup Failed: $($_.Exception.Message)"
+              cfn-signal --success false --stack ${AWS::StackName} --resource WindowsEc2 --region ${AWS::Region}
+              throw
+          }
+
+          cfn-signal --success true --stack ${AWS::StackName} --resource WindowsEc2 --region ${AWS::Region}
+          </powershell>
+  WindowsEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: windows-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        !If [SecurityGroupInboundFromAnywhere, [{
+          "IpProtocol": "tcp",
+          "FromPort": 3389,
+          "ToPort": 3389,
+          "CidrIp": "0.0.0.0/0"
+        }], []]
+      Tags:
+        - Key: Name
+          Value: windows-sg
+  WindowsEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  WindowsEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref WindowsEc2IamRole
+
+  WindowsUserPassword:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${Username}"}'
+        GenerateStringKey: password
+        PasswordLength: 20
+        ExcludeCharacters: '"@/\'
+        RequireEachIncludedType: true
+        IncludeSpace: false
+  SecretPlaintext:
+    Type: Custom::SecretPlaintextLambda
+    Properties:
+      ServiceToken: !GetAtt SecretPlaintextLambda.Arn
+      ServiceTimeout: 15
+      SecretArn: !Ref WindowsUserPassword
+  SecretPlaintextLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub lambda.${AWS::URLSuffix}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecretsManagerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
+  SecretPlaintextLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Return the value of the secret
+      Handler: index.lambda_handler
+      Runtime: python3.13
+      MemorySize: 128
+      Timeout: 10
+      Architectures:
+        - arm64
+      Role: !GetAtt SecretPlaintextLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import cfnresponse
+          import logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          def is_valid_json(json_string):
+            logger.debug(f'Calling is_valid_json: {json_string}')
+            try:
+              json.loads(json_string)
+              logger.info('Secret is in json format')
+              return True
+            except json.JSONDecodeError:
+              logger.info('Secret is in string format')
+              return False
+          def lambda_handler(event, context):
+            logger.debug(f'event: {event}')
+            logger.debug(f'context: {context}')
+            try:
+              if event['RequestType'] == 'Delete':
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
+              else:
+                resource_properties = event['ResourceProperties']
+                secret_name = resource_properties['SecretArn']
+                secrets_mgr = boto3.client('secretsmanager')
+                logger.info(f'Getting secret from {secret_name}')
+                secret = secrets_mgr.get_secret_value(SecretId=secret_name)
+                logger.debug(f'secret: {secret}')
+                secret_value = secret['SecretString']
+                responseData = {}
+                if is_valid_json(secret_value):
+                    secret_json = json.loads(secret_value)
+                    responseData = secret_json
+                else:
+                    responseData = {'secret': secret_value}
+                logger.debug(f'responseData: {responseData}')
+                logger.debug(f'type(responseData): {type(responseData)}')
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData=responseData, reason='OK', noEcho=True)
+            except Exception as e:
+              logger.error(e)
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason=str(e))
+
+Outputs:
+  01GomokuClientZipFileDownload:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/s3/object/${GameSourceS3Bucket}?region=${AWS::Region}&bucketType=general&prefix=client.zip
+  02GomokuWeb:
+    Value: !GetAtt WebS3Bucket.WebsiteURL
+    Description: Gomoku Leaderboard URL
+  03GameClientRdpUrl:
+    Value: !Sub ${WindowsEc2.PublicIp}:3389
+  04GameClientRdpUsername:
+    Value: !Ref Username
+  05GameClientRdpPassword:
+    Value: !GetAtt SecretPlaintext.password
+  06GameServerAccess:
+    Value: !Sub |
+      GAME_SERVER_INSTANCE=$(aws gamelift describe-instances --fleet-id ${GameLiftFleet} --output text --query 'Instances[0].InstanceId'); aws gamelift get-instance-access --fleet-id ${GameLiftFleet} --instance-id $GAME_SERVER_INSTANCE
