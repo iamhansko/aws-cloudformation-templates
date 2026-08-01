@@ -1267,6 +1267,7 @@ Outputs:
   03GameClientAccess:
     Value: !Sub |
       cmdkey /generic:TERMSRV/${WindowsEc2.PublicIp} /user:${Username} /pass:"${SecretPlaintext.password}" && mstsc /v:${WindowsEc2.PublicIp}:3389
+    Description: Windows / CMD
   04GameServerAccess:
     Value: !Sub |
       GAME_SERVER_INSTANCE=$(aws gamelift describe-instances --fleet-id ${GameLiftFleet} --output text --query 'Instances[0].InstanceId'); aws gamelift get-instance-access --fleet-id ${GameLiftFleet} --instance-id $GAME_SERVER_INSTANCE
