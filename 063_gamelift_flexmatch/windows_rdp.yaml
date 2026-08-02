@@ -1266,12 +1266,12 @@ Outputs:
     Description: Gomoku Leaderboard URL
   03GameClientAccess:
     Value: !Sub |
-      cmdkey /generic:TERMSRV/${WindowsEc2.PublicIp} /user:${Username} /pass:"${SecretPlaintext.password}" && mstsc /v:${WindowsEc2.PublicIp}:3389
-    Description: Windows / CMD
+      Computer : ${WindowsEc2.PublicIp} / Username : ${Username} / Password : ${SecretPlaintext.password}
+    Description: Connect to the Game Client (Windows) using RDP
   04GameServerAccess:
     Value: !Sub |
       GAME_SERVER_INSTANCE=$(aws gamelift describe-instances --fleet-id ${GameLiftFleet} --output text --query 'Instances[0].InstanceId'); aws gamelift get-instance-access --fleet-id ${GameLiftFleet} --instance-id $GAME_SERVER_INSTANCE
-    Description: https://docs.aws.amazon.com/gameliftservers/latest/developerguide/fleets-remote-access.html#fleets-remote-access-connect
+    Description: Connect to the Game Server (Windows) using RDP (https://docs.aws.amazon.com/gameliftservers/latest/developerguide/fleets-remote-access.html#fleets-remote-access-connect)
   05ElasticacheRedisConnect:
     Value: !Sub |
       redis6-cli -h ${GomokuRanking.RedisEndpoint.Address} -p 6379 ZRANGE Rating 0 -1 WITHSCORES
