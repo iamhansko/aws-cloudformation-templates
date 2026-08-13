@@ -1,0 +1,717 @@
+Transform: AWS::LanguageExtensions
+Parameters:
+  DefaultDomain:
+    Type: String
+    Description: example.com
+    MinLength: 4
+    MaxLength: 253
+    AllowedPattern: ([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}
+    ConstraintDescription: "[DefaultDomain] must not be empty"
+  DefaultDomainRoute53HostedZone:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Shlink Default Domain Name (Public Hosted Zone should be already created)
+  InboundFromAnywhere:
+    Type: String
+    Default: "False"
+    AllowedValues: ["True", "False"]
+    Description: SecurityGroup Inbound Rule (Source 0.0.0.0/0)
+Conditions:
+  SecurityGroupInboundFromAnywhere: !Equals [!Ref InboundFromAnywhere, "True"]
+
+Mappings:
+  AzMapping: 
+    a:
+      PublicSubnetCidr: 10.0.0.0/24
+      PrivateSubnetCidr: 10.0.1.0/24
+    b: 
+      PublicSubnetCidr: 10.0.2.0/24
+      PrivateSubnetCidr: 10.0.3.0/24
+    c: 
+      PublicSubnetCidr: 10.0.4.0/24
+      PrivateSubnetCidr: 10.0.5.0/24
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - key-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: True
+      EnableDnsHostnames: True
+      Tags:
+        - Key: Name
+          Value: vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: igw
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  # PublicSubnets
+  Fn::ForEach::PublicSubnets:
+    - Az
+    - [a, c]
+    - PublicSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PublicSubnetCidr]
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: !Sub public-subnet-${Az}
+          VpcId: !Ref Vpc
+      PublicSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId: !Ref PublicSubnetRouteTable
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: public-rt
+      VpcId: !Ref Vpc
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcInternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  
+  # PrivateSubnets
+  Fn::ForEach::PrivateSubnets:
+    - Az
+    - [a, c]
+    - PrivateSubnet${Az}:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: !Ref Vpc
+          CidrBlock: !FindInMap [AzMapping, !Ref Az, PrivateSubnetCidr]
+          AvailabilityZone: !Sub ${AWS::Region}${Az}
+          Tags:
+            - Key: Name
+              Value: !Sub private-subnet-${Az}
+      PrivateSubnet${Az}RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref Vpc
+          Tags:
+            - Key: Name
+              Value: !Sub private-rt-${Az}
+      Natgateway${Az}ElasticIp:
+        Type: AWS::EC2::EIP
+      NatGateway${Az}:
+        Type: AWS::EC2::NatGateway
+        Properties:
+          AllocationId: !GetAtt
+            - !Sub Natgateway${Az}ElasticIp
+            - AllocationId
+          SubnetId:
+            Ref: !Sub PublicSubnet${Az}
+          Tags: 
+            - Key : Name
+              Value : !Sub natgw-${Az}
+      PrivateSubnet${Az}RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+          SubnetId: 
+            Ref: !Sub PrivateSubnet${Az}
+      PrivateSubnet${Az}Route:
+        Type: AWS::EC2::Route
+        Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          NatGatewayId:
+            Ref: !Sub NatGateway${Az}
+          RouteTableId:
+            Ref: !Sub PrivateSubnet${Az}RouteTable
+  
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enhanced
+
+  ManagedInstancesCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      ClusterName: !Ref EcsCluster
+      ManagedInstancesProvider:
+        InfrastructureRoleArn: !GetAtt EcsInfrastructureRole.Arn
+        PropagateTags: CAPACITY_PROVIDER
+        InstanceLaunchTemplate:
+          Ec2InstanceProfileArn: !GetAtt EcsInstanceProfile.Arn
+          CapacityOptionType: ON_DEMAND # SPOT RESERVED
+          Monitoring: BASIC # DETAILED
+          NetworkConfiguration:
+            Subnets:
+              - !Ref PrivateSubneta
+              - !Ref PrivateSubnetc
+            SecurityGroups:
+              - !GetAtt EcsManagedInstancesSecurityGroup.GroupId
+          StorageConfiguration:
+            StorageSizeGiB: 30
+          InstanceRequirements:
+            VCpuCount:
+              Min: 1
+              Max: 4
+            MemoryMiB:
+              Min: 2048
+              Max: 8192
+  EcsInfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub
+        - ecsInstanceRole-${Id}
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EcsInstanceRole
+  EcsManagedInstancesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      VpcId: !Ref Vpc
+  
+  ShlinkTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: shlink
+      ContainerDefinitions:
+        - Name: shlink
+          Image: shlinkio/shlink:stable
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ShlinkLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+              mode: non-blocking
+              max-buffer-size: 25m
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - wget --spider -q http://127.0.0.1:8080/rest/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 5
+            StartPeriod: 10
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Secrets:
+            - Name: DEFAULT_DOMAIN
+              ValueFrom: !Sub "${Secret}:DEFAULT_DOMAIN::"
+            - Name: IS_HTTPS_ENABLED
+              ValueFrom: !Sub "${Secret}:IS_HTTPS_ENABLED::"
+            - Name: TIMEZONE
+              ValueFrom: !Sub "${Secret}:TIMEZONE::"
+            - Name: INITIAL_API_KEY
+              ValueFrom: !Sub "${Secret}:SHLINK_API_KEY::"
+          MountPoints:
+            - SourceVolume: shlink_data
+              ContainerPath: /etc/shlink/data
+              ReadOnly: false
+      Cpu: 512
+      Memory: 1024
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - MANAGED_INSTANCES # EC2 FARGATE EXTERNAL
+      RuntimePlatform:
+        CpuArchitecture: X86_64 # ARM64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      Volumes:
+        - Name: shlink_data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref EfsFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref EfsAccessPoint
+              IAM: ENABLED
+  ShlinkLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /ecs/task/shlink
+      RetentionInDays: 30
+  ShlinkServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref ShlinkAlbSecurityGroup
+          Description: ALB
+  ShlinkService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - EfsMountTargeta
+      - EfsMountTargetc
+      - ShlinkAlbListener
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref ShlinkTaskDefinition
+      DesiredCount: 1
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref ManagedInstancesCapacityProvider
+          Weight: 100
+      HealthCheckGracePeriodSeconds: 60
+      LoadBalancers:
+        - ContainerName: shlink
+          ContainerPort: 8080
+          TargetGroupArn: !Ref ShlinkAlbTargetGroup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubneta
+            - !Ref PrivateSubnetc
+          SecurityGroups:
+            - !GetAtt ShlinkServiceSecurityGroup.GroupId
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+
+  WebClientTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: shlink-web-client
+      ContainerDefinitions:
+        - Name: shlink-web-client
+          Image: shlinkio/shlink-web-client:stable
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WebClientLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+              mode: non-blocking
+              max-buffer-size: 25m
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Secrets:
+            - Name: SHLINK_SERVER_URL
+              ValueFrom: !Sub "${Secret}:SHLINK_SERVER_URL::"
+            - Name: SHLINK_SERVER_NAME
+              ValueFrom: !Sub "${Secret}:SHLINK_SERVER_NAME::"
+            - Name: SHLINK_SERVER_API_KEY
+              ValueFrom: !Sub "${Secret}:SHLINK_API_KEY::"
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - MANAGED_INSTANCES
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+  WebClientLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /ecs/task/web-client
+      RetentionInDays: 30
+  WebClientServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref WebClientAlbSecurityGroup
+          Description: ALB
+  WebClientService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - WebClientAlbListener
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WebClientTaskDefinition
+      DesiredCount: 1
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref ManagedInstancesCapacityProvider
+          Weight: 100
+      LoadBalancers:
+        - ContainerName: shlink-web-client
+          ContainerPort: 8080
+          TargetGroupArn: !Ref WebClientAlbTargetGroup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubneta
+            - !Ref PrivateSubnetc
+          SecurityGroups:
+            - !GetAtt WebClientServiceSecurityGroup.GroupId
+
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: AllowSecretManagerGetSecretValue
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref Secret
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowEfsClient
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                Resource: !GetAtt EfsFileSystem.Arn
+                Condition:
+                  StringEquals:
+                    elasticfilesystem:AccessPointArn: !GetAtt EfsAccessPoint.Arn
+
+  EfsFileSystem:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      BackupPolicy:
+        Status: ENABLED
+      FileSystemTags:
+        - Key: Name
+          Value: shlink
+  EfsAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      PosixUser:
+        Uid: 1001
+        Gid: 1001
+      RootDirectory:
+        Path: /shlink
+        CreationInfo:
+          OwnerUid: 1001
+          OwnerGid: 1001
+          Permissions: "0755"
+  Fn::ForEach::EfsMountTargets:
+    - Az
+    - [a, c]
+    - EfsMountTarget${Az}:
+        Type: AWS::EFS::MountTarget
+        Properties:
+          FileSystemId: !Ref EfsFileSystem
+          SecurityGroups: 
+            - !GetAtt EfsSecurityGroup.GroupId
+          SubnetId:
+            Ref: !Sub PrivateSubnet${Az}
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !GetAtt EcsManagedInstancesSecurityGroup.GroupId
+          Description: ECS Managed Instances
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref ShlinkServiceSecurityGroup
+          Description: ECS Task
+
+  Secret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      SecretString: !Sub |
+        {
+          "DEFAULT_DOMAIN":"shlink.${DefaultDomain}",
+          "IS_HTTPS_ENABLED":"true",
+          "SHLINK_API_KEY":"${ApiKey}",
+          "SHLINK_SERVER_URL":"https://shlink.${DefaultDomain}",
+          "SHLINK_SERVER_NAME":"shlink",
+          "SHLINK_PORT":"8080",
+          "WEB_CLIENT_PORT":"8000",
+          "TIMEZONE":"Asia/Seoul"
+        }
+  ApiKey:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.14
+      Handler: index.handler
+      Role: !GetAtt LambdaIamRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import uuid
+          import boto3
+          import cfnresponse
+          def handler(event, context):
+            print(f"Event : {json.dumps(event)}")
+            request_type = event["RequestType"]
+            response_data = {}
+            try:
+              if request_type == "Create":
+                value = str(uuid.uuid4())
+              elif request_type == "Update":
+                value = event["PhysicalResourceId"]
+              elif request_type == "Delete":
+                value = event["PhysicalResourceId"]
+              response_data["Value"] = value
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, value)
+            except Exception as e:
+              response_data["Message"] = "Error"
+              cfnresponse.send(event, context, cfnresponse.FAILED, response_data, reason=str(e))
+  LambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  
+  Route53Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub "shlink.${DefaultDomain}"
+      Type: A
+      AliasTarget: 
+        DNSName: !GetAtt ShlinkAlb.DNSName
+        EvaluateTargetHealth: False
+        HostedZoneId: !GetAtt ShlinkAlb.CanonicalHostedZoneID
+      HostedZoneName: !Sub "${DefaultDomain}."
+  AcmCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub shlink.${DefaultDomain}
+      DomainValidationOptions: 
+        - DomainName: !Sub shlink.${DefaultDomain}
+          HostedZoneId: !Ref DefaultDomainRoute53HostedZone
+      KeyAlgorithm: RSA_2048
+      ValidationMethod: DNS
+  
+  ShlinkAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetc
+      SecurityGroups:
+        - !Ref ShlinkAlbSecurityGroup
+  ShlinkAlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      TargetType: ip
+      Protocol: HTTP
+      Port: 8080
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /rest/health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+  ShlinkAlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ShlinkAlb
+      Protocol: HTTPS
+      Port: 443
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref AcmCertificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ShlinkAlbTargetGroup
+  ShlinkAlbRedirectListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ShlinkAlb
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: 443
+            Host: "#{host}"
+            Path: "/#{path}"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+  ShlinkAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: shlink-alb-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: !If
+        - SecurityGroupInboundFromAnywhere
+        - - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: 0.0.0.0/0
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+        - []
+      Tags:
+        - Key: Name
+          Value: shlink-alb-sg
+  
+  WebClientAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets: 
+        - !Ref PublicSubneta
+        - !Ref PublicSubnetc
+      SecurityGroups:
+        - !Ref WebClientAlbSecurityGroup
+  WebClientAlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      TargetType: ip
+      Protocol: HTTP
+      Port: 8080
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200-399"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+  WebClientAlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WebClientAlb
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebClientAlbTargetGroup
+  WebClientAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      GroupName: web-client-alb-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: !If
+        - SecurityGroupInboundFromAnywhere
+        - - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+        - []
+      Tags:
+        - Key: Name
+          Value: web-client-alb-sg
+
+Outputs:
+  ShlinkDomain:
+    Value: !Sub https://shlink.${DefaultDomain}
+  ShlinkApiKey:
+    Value: !Ref ApiKey
+  ShlinkWebClient:
+    Value: !Sub http://${WebClientAlb.DNSName}

@@ -84,6 +84,7 @@ Resources:
       VpcId: !Ref Vpc
   PublicSubnetRoute:
     Type: AWS::EC2::Route
+    DependsOn: VpcInternetGatewayAttachment
     Properties:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
@@ -1259,7 +1260,7 @@ Resources:
               cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason=str(e))
 
 Outputs:
-  01GomokuClientZipFileDownload:
+  01GameClientZipFileDownload:
     Value: !Sub https://${AWS::Region}.console.aws.amazon.com/s3/object/${GameSourceS3Bucket}?region=${AWS::Region}&bucketType=general&prefix=client.zip
   02GomokuWeb:
     Value: !GetAtt WebS3Bucket.WebsiteURL
