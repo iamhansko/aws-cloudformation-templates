@@ -156,7 +156,10 @@ Resources:
       ClusterName: !Ref EcsCluster
       ManagedInstancesProvider:
         InfrastructureRoleArn: !GetAtt EcsInfrastructureRole.Arn
-        PropagateTags: CAPACITY_PROVIDER
+        InfrastructureOptimization:
+          ScaleInAfter: 0
+        AutoRepairConfiguration:
+          ActionsStatus: ENABLED
         InstanceLaunchTemplate:
           Ec2InstanceProfileArn: !GetAtt EcsInstanceProfile.Arn
           CapacityOptionType: ON_DEMAND # SPOT RESERVED
@@ -176,6 +179,14 @@ Resources:
             MemoryMiB:
               Min: 2048
               Max: 8192
+          # CapacityReservations: 
+          #   ReservationGroupArn: String
+          #   ReservationPreference: RESERVATIONS_ONLY # RESERVATIONS_FIRST | RESERVATIONS_EXCLUDED
+          # FipsEnabled: true
+          # InstanceMetadataTagsPropagation: true
+          # LocalStorageConfiguration: 
+          #   UseLocalStorage: true
+        # PropagateTags: CAPACITY_PROVIDER
   EcsInfrastructureRole:
     Type: AWS::IAM::Role
     Properties:
@@ -513,19 +524,18 @@ Resources:
   ApiKey:
     Type: AWS::CloudFormation::CustomResource
     Properties:
-      ServiceToken: !GetAtt LambdaFunction.Arn
-  LambdaFunction:
+      ServiceToken: !GetAtt SecretManagerLambdaFunction.Arn
+  SecretManagerLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
       Runtime: python3.14
       Handler: index.handler
-      Role: !GetAtt LambdaIamRole.Arn
+      Role: !GetAtt SecretManagerLambdaIamRole.Arn
       Timeout: 30
       Code:
         ZipFile: |
           import json
           import uuid
-          import boto3
           import cfnresponse
           def handler(event, context):
             print(f"Event : {json.dumps(event)}")
@@ -543,7 +553,7 @@ Resources:
             except Exception as e:
               response_data["Message"] = "Error"
               cfnresponse.send(event, context, cfnresponse.FAILED, response_data, reason=str(e))
-  LambdaIamRole:
+  SecretManagerLambdaIamRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -707,6 +717,78 @@ Resources:
       Tags:
         - Key: Name
           Value: web-client-alb-sg
+  
+  DeleteEcsManagedInstances:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: ManagedInstancesCapacityProvider
+    Properties:
+      ServiceToken: !GetAtt EcsLambdaFunction.Arn
+      EcsCluster: !Ref EcsCluster
+      EcsServices:
+        - !Ref ShlinkService
+        - !Ref WebClientService
+  EcsLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.14
+      Handler: index.handler
+      Role: !GetAtt EcsLambdaIamRole.Arn
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import json
+          import time
+          import boto3
+          import cfnresponse
+          def handler(event, context):
+            print(f"Event : {json.dumps(event)}")
+            request_type = event["RequestType"]
+            ecs_cluster = event["ResourceProperties"]["EcsCluster"]
+            ecs_services = event["ResourceProperties"]["EcsServices"]
+            response_data = {}
+            ecs = boto3.client("ecs")
+            try:
+              response = ecs.describe_clusters(clusters=[ecs_cluster])
+              container_instances = response["clusters"][0]["registeredContainerInstancesCount"]
+              response_data["ContainerInstancesCount"] = str(container_instances)
+              if request_type == "Delete":
+                for service in ecs_services:
+                  ecs.update_service(cluster=ecs_cluster,service=service,desiredCount=0)
+                while True:
+                  response = ecs.describe_clusters(clusters=[ecs_cluster])
+                  container_instances = response["clusters"][0]["registeredContainerInstancesCount"]                  
+                  if container_instances == 0:
+                    response_data["ContainerInstancesCount"] = str(0)
+                    break
+                  time.sleep(10)
+              # elif request_type == "Create":
+              # elif request_type == "Update":
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+            except Exception as e:
+              response_data["Message"] = "Error"
+              cfnresponse.send(event, context, cfnresponse.FAILED, response_data, reason=str(e))
+  EcsLambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowSecretManagerGetSecretValue
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ecs:UpdateService
+                  - ecs:DescribeClusters
+                Resource: "*"
 
 Outputs:
   ShlinkDomain:
